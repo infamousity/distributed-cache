@@ -1,0 +1,12 @@
+*
+!/.gitignore
+!/.env
+!*.go
+!go.sum
+!go.mod
+!README.md
+!LICENSE
+!config.yml
+!docker-compose.yml
+!Dockerfile
+!*/

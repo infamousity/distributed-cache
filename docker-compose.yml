@@ -1,0 +1,40 @@
+version: '3.9'
+services:
+  cache-node-a:
+    image: chrismoran/infamousity:distributed-cache.0
+    build: .
+    networks:
+      - cache_net
+    container_name: node-a
+    hostname: node-a
+    ports:
+      - "8080:8080"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+  cache-node-b:
+    image: chrismoran/infamousity:distributed-cache.0
+    build: .
+    networks:
+      - cache_net
+    container_name: node-b
+    hostname: node-b
+    ports:
+      - "8081:8080"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+  cache-node-c:
+    image: chrismoran/infamousity:distributed-cache.0
+    build: .
+    networks:
+      - cache_net
+    container_name: node-c
+    hostname: node-c
+    ports:
+      - "8082:8080"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+
+networks:
+  cache_net:
+    driver: overlay
+    attachable: true

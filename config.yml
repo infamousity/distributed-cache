@@ -1,0 +1,14 @@
+common:
+  cache:
+    log:
+      level: info
+    size: 1_073_741_824
+    doppio:
+      bind_port: 8080
+    cluster:
+      memberlist:
+        node_name: "{{ hostname }}"
+        bind_address: "{{ ip }}"
+        bind_port: 8946
+        advertise_addr: "{{ hostname }}"
+        advertise_port: 8946
