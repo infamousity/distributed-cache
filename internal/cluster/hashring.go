@@ -2,10 +2,13 @@ package cluster
 
 import (
 	"fmt"
-	"github.com/buraksezer/consistent"
-	"github.com/cespare/xxhash/v2"
-	"github.com/infamousity/distributed-cache/internal/config"
 	"sync"
+
+	"github.com/dgraph-io/ristretto/v2/z"
+
+	"github.com/buraksezer/consistent"
+
+	"github.com/infamousity/distributed-cache/internal/config"
 )
 
 // Node is the interface your server and cluster code uses to add/remove members
@@ -14,9 +17,11 @@ type Node interface {
 	Add(name, httpAddr string)                 // register a new node
 	Remove(name string)                        // unregister a node by name
 	Get(key string) (string, bool)             // owner of key, returns Name
+	GetFromHash(hash uint64) (string, bool)    // hash of key, returns owner of key hash Name
 	GetN(key string, n int) ([]string, bool)   // top-n owners
 	GetForwardAddr(name string) (string, bool) // for the node's Name, find the forwarding address
 	List() []string                            // list of all nodes in the ring
+	LoadDistribution() map[string]float64      // exposes LoadDistribution
 	GetSelf() string                           // the ring’s “self” name (hostname)
 	GetConfig() *config.Config                 // the memberlist configuration
 }
@@ -36,7 +41,8 @@ func (m ringMember) String() string {
 type hasher struct{}
 
 func (h hasher) Sum64(data []byte) uint64 {
-	return xxhash.Sum64(data)
+	keyHash, _ := z.KeyToHash(string(data))
+	return keyHash
 }
 
 type ring struct {
@@ -48,13 +54,16 @@ type ring struct {
 
 // NewHashRing creates a new empty ring.  Pass in your node‐name so GetSelf works.
 func NewHashRing(selfName string, c *config.Config) Node {
+	if c.Common.Cache.Cluster.MemberList.PartitionCount == 0 {
+		c.Common.Cache.Cluster.MemberList.PartitionCount = consistent.DefaultPartitionCount
+	}
 	cfg := consistent.Config{
-		PartitionCount:    271,
+		PartitionCount:    c.Common.Cache.Cluster.MemberList.PartitionCount,
 		ReplicationFactor: 3,
 		Load:              1.25,
 		Hasher:            hasher{},
 	}
-	httpAddr := fmt.Sprintf("%s:%d", c.Common.Cache.Doppio.BindAddr, c.Common.Cache.Doppio.BindPort)
+	httpAddr := fmt.Sprintf("%s:%d", c.Common.Cache.Http.BindAddr, c.Common.Cache.Http.BindPort)
 	r := &ring{
 		hash: consistent.New([]consistent.Member{
 			ringMember{Name: selfName, HTTPAddr: httpAddr},
@@ -62,7 +71,7 @@ func NewHashRing(selfName string, c *config.Config) Node {
 		self: selfName,
 		cfg:  c,
 	}
-	// you can optionally seed yourself here, or let memberlist-driven code add you
+
 	return r
 }
 
@@ -100,6 +109,18 @@ func (r *ring) Get(key string) (string, bool) {
 	if m == nil {
 		return "", false
 	}
+	return m.(ringMember).Name, true
+}
+
+func (r *ring) GetFromHash(hash uint64) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	m := r.hash.GetPartitionOwner(int(hash % uint64(r.cfg.Common.Cache.Cluster.MemberList.PartitionCount)))
+	if m == nil {
+		return "", false
+	}
+
 	return m.(ringMember).Name, true
 }
 
@@ -141,6 +162,13 @@ func (r *ring) List() []string {
 		out = append(out, m.(ringMember).Name)
 	}
 	return out
+}
+
+func (r *ring) LoadDistribution() map[string]float64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.hash.LoadDistribution()
 }
 
 func (r *ring) GetSelf() string {

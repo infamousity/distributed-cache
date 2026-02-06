@@ -1,14 +1,14 @@
 module github.com/infamousity/distributed-cache
 
-go 1.24
+go 1.25.6
 
 require (
 	github.com/Masterminds/sprig/v3 v3.3.0
 	github.com/buraksezer/consistent v0.10.0
-	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/dgraph-io/ristretto/v2 v2.2.0
+	github.com/dlclark/regexp2 v1.11.5
 	github.com/gin-gonic/gin v1.10.1
-	github.com/go-viper/mapstructure/v2 v2.3.0
+	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/hashicorp/memberlist v0.5.3
 	github.com/joho/godotenv v1.5.1
@@ -65,14 +65,17 @@ require (
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
+	github.com/twmb/murmur3 v1.1.8 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
-	golang.org/x/crypto v0.36.0 // indirect
+	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/text v0.24.0 // indirect
 	google.golang.org/protobuf v1.36.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/dgraph-io/ristretto/v2 => github.com/infamousity/ristretto/v2 v2.3.1-alpha.1

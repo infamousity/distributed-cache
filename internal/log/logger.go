@@ -3,12 +3,13 @@ package log
 import (
 	"context"
 	"fmt"
-	"github.com/go-viper/mapstructure/v2"
 	"io"
 	"log/slog"
 	"os"
 	"reflect"
 	"strings"
+
+	"github.com/go-viper/mapstructure/v2"
 )
 
 const (

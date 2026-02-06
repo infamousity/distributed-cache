@@ -5,46 +5,113 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
-	"github.com/joho/godotenv"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"text/template"
+	"time"
 
 	"github.com/Masterminds/sprig/v3"
+	regexp "github.com/dlclark/regexp2"
 	"github.com/go-viper/mapstructure/v2"
-	"github.com/infamousity/distributed-cache/internal/log"
+	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 	"mvdan.cc/sh/v3/shell"
+
+	"github.com/infamousity/distributed-cache/internal/log"
 )
 
-// Config is the root of your application configuration.
+var (
+	tyTime          = reflect.TypeOf((*time.Time)(nil)).Elem()
+	tyTimePtr       = reflect.TypeOf((*time.Time)(nil))
+	bindAddressOnce sync.Once
+	bindAddress     string
+	bindAddressErr  error
+	bindFilter      = []string{"10.0.0.0/8", "172.0.0.0/8", "192.0.0.0/8"}
+	ifcPriority     = []string{
+		`en.*`,
+		`eth.*`,
+		`wl.*`,
+	}
+)
+
+// Config is the root application configuration.
 type Config struct {
 	Common struct {
 		Cache struct {
 			Cluster struct {
+				Tls struct {
+					Enabled    bool   `mapstructure:"enabled"`
+					CertFile   string `mapstructure:"cert_file,omitempty"`
+					KeyFile    string `mapstructure:"key_file,omitempty"`
+					CaFile     string `mapstructure:"ca_file,omitempty"`
+					ServerName string `mapstructure:"server_name,omitempty"`
+				} `mapstructure:"tls"`
 				MemberList struct {
-					NodeName      string   `mapstructure:"node_name"`
-					BindAddr      string   `mapstructure:"bind_address"`      // e.g. "0.0.0.0"
-					BindPort      int      `mapstructure:"bind_port"`         // gossip port, e.g. 8946
-					AdvertiseAddr string   `mapstructure:"advertise_address"` // optional; falls back to BindAddr
-					AdvertisePort int      `mapstructure:"advertise_port"`    // usually same as BindPort
-					SeedNodes     []string `mapstructure:"seed_nodes"`        // gossip seed nodes: ["10.10.1.3:8946", ...]
+					NodeName        string   `mapstructure:"node_name"`
+					BindAddr        string   `mapstructure:"bind_address"`            // e.g. "0.0.0.0"
+					BindAddrFilter  []string `mapstructure:"bind_address_filter"`     // defaults to ["10.0.0.0/8", "172.0.0.0/8", "192.0.0.0/8"]
+					BindIfcPriority []string `mapstructure:"bind_interface_priority"` // defaults to ["^en.*$", "^eth.*$", "^wl.*$"]
+					BindPort        int      `mapstructure:"bind_port"`               // gossip port, e.g. 8946
+					AdvertiseAddr   string   `mapstructure:"advertise_address"`       // optional; falls back to BindAddr
+					AdvertisePort   int      `mapstructure:"advertise_port"`          // usually same as BindPort
+					SeedNodes       []string `mapstructure:"seed_nodes"`              // gossip seed nodes: ["10.10.1.3:8946", ...]
+					PartitionCount  int      `mapstructure:"partition_count"`         // max partitions in this memberlist (default: 271)
 				} `mapstructure:"memberlist"`
 			} `mapstructure:"cluster"`
-			Doppio struct {
+			Http struct {
 				BindAddr string `mapstructure:"bind_addr"`
 				BindPort int    `mapstructure:"bind_port"`
-			} `mapstructure:"doppio"`
+			} `mapstructure:"api"`
 			Log struct {
 				Level string `mapstructure:"level"`
 			} `mapstructure:"log"`
-			SizeBytes int `mapstructure:"size_bytes"`
+			SizeBytes int    `mapstructure:"size_bytes"`
+			SharedKey string `mapstructure:"shared_key"`
 		} `mapstructure:"cache"`
 	} `mapstructure:"common"`
+}
+
+func internalBinds(v *viper.Viper) error {
+	if err := v.BindEnv("common.cache.cluster.memberlist.node_name", "CACHE_CLUSTER_MEMBERLIST_NODE_NAME"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.bind_address", "CACHE_CLUSTER_MEMBERLIST_BIND_ADDRESS"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.bind_address_filter", "CACHE_CLUSTER_MEMBERLIST_BIND_ADDRESS_FILTER"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.bind_interface_priority", "CACHE_CLUSTER_MEMBERLIST_BIND_INTERFACE_PRIORITY"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.bind_port", "CACHE_CLUSTER_MEMBERLIST_BIND_PORT"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.api_port", "CACHE_CLUSTER_MEMBERLIST_API_PORT"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.seed_nodes", "CACHE_CLUSTER_MEMBERLIST_SEED_NODES"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.http.bind_addr", "CACHE_HTTP_BIND_ADDR"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.http.bind_port", "CACHE_HTTP_BIND_PORT"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.log.level", "CACHE_LOG_LEVEL"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.size", "CACHE_SIZE"); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Load reads, merges, and decodes one or more config files in order.
@@ -76,22 +143,14 @@ func Load(paths ...string) (*Config, error) {
 	base := viper.New()
 	base.SetEnvPrefix("CACHE")
 	base.AutomaticEnv()
-	base.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	dotReplacer := strings.NewReplacer(".", "_")
+	base.SetEnvKeyReplacer(dotReplacer)
 
 	// === defaults ===
 	base.SetDefault("common.cache.size_bytes", 1<<30)
 	// Env var bindings for deeply nested config fields
-	_ = base.BindEnv("common.cache.cluster.memberlist.node_name", "NODE_NAME")
-	_ = base.BindEnv("common.cache.cluster.memberlist.bind_port", "BIND_PORT")
-	_ = base.BindEnv("common.cache.cluster.memberlist.api_port", "API_PORT")
-	_ = base.BindEnv("common.cache.cluster.memberlist.seed_nodes", "SEED_NODES")
-	_ = base.BindEnv("common.cache.doppio.bind_addr", "DOPPIO_ADDR")
-	_ = base.BindEnv("common.cache.doppio.bind_port", "DOPPIO_PORT")
-	_ = base.BindEnv("common.cache.log.level", "LOG_LEVEL")
-	_ = base.BindEnv("common.cache.size", "CACHE_SIZE")
-	sn, ok := os.LookupEnv("SEED_NODES")
-	if ok {
-		log.Default().Infof("Seed nodes: %s", sn)
+	if err := internalBinds(base); err != nil {
+		return nil, err
 	}
 
 	// if no explicit paths, fallback to CACHE_CONFIG
@@ -112,14 +171,11 @@ func Load(paths ...string) (*Config, error) {
 		tmp.SetConfigType(ext)
 		tmp.AutomaticEnv()
 		tmp.SetEnvPrefix("CACHE")
-		_ = tmp.BindEnv("common.cache.cluster.memberlist.node_name", "NODE_NAME")
-		_ = tmp.BindEnv("common.cache.cluster.memberlist.bind_port", "BIND_PORT")
-		_ = tmp.BindEnv("common.cache.cluster.memberlist.api_port", "API_PORT")
-		_ = tmp.BindEnv("common.cache.cluster.memberlist.seed_nodes", "SEED_NODES")
-		_ = tmp.BindEnv("common.cache.doppio.bind_addr", "DOPPIO_ADDR")
-		_ = tmp.BindEnv("common.cache.doppio.bind_port", "DOPPIO_PORT")
-		_ = tmp.BindEnv("common.cache.log.level", "LOG_LEVEL")
-		_ = tmp.BindEnv("common.cache.size", "CACHE_SIZE")
+		tmp.SetEnvKeyReplacer(dotReplacer)
+
+		if err := internalBinds(tmp); err != nil {
+			return nil, err
+		}
 
 		if err := tmp.ReadInConfig(); err != nil {
 			return nil, fmt.Errorf("read config %s: %w", path, err)
@@ -128,64 +184,86 @@ func Load(paths ...string) (*Config, error) {
 			return nil, fmt.Errorf("merge config %s: %w", path, err)
 		}
 	}
+	defaultBindFilter := base.GetStringSlice("common.cache.cluster.memberlist.bind_address_filter")
+	if defaultBindFilter == nil {
+		defaultBindFilter = bindFilter
+		base.Set("common.cache.cluster.memberlist.bind_address_filter", defaultBindFilter)
+	}
+	var ifacePrefixPriority []*regexp.Regexp
+	defaultIfcPriority := base.GetStringSlice("common.cache.cluster.memberlist.bind_interface_priority")
+	if defaultIfcPriority == nil {
+		ifacePrefixPriority = make([]*regexp.Regexp, 0)
+		for _, ifc := range ifcPriority {
+			if !strings.HasPrefix(ifc, "^") {
+				ifc = fmt.Sprintf("^%s", ifc)
+			}
+			if !strings.HasSuffix(ifc, "$") {
+				ifc = fmt.Sprintf("%s$", ifc)
+			}
+
+			ifacePrefixPriority = append(ifacePrefixPriority, regexp.MustCompile(ifc, regexp.RE2))
+		}
+		base.Set("common.cache.cluster.memberlist.bind_interface_priority", ifcPriority)
+	}
 
 	// decode
 	cfg := new(Config)
 	hooks := mapstructure.ComposeDecodeHookFunc(
+		RecursiveStructToMapHookFunc(newRootTemplate(defaultBindAddress(defaultBindFilter, ifacePrefixPriority))),
 		mapstructure.StringToTimeDurationHookFunc(),
 		mapstructure.StringToSliceHookFunc(","),
 		TextUnmarshallerHookFunc(),
+		TemplateUnmarshallerHookFunc(newRootTemplate(defaultBindAddress(defaultBindFilter, ifacePrefixPriority))),
 	)
-	decCfg := &mapstructure.DecoderConfig{
-		DecodeHook:       hooks,
-		Result:           cfg,
-		TagName:          "mapstructure",
-		WeaklyTypedInput: true,
-	}
-	if dec, err := mapstructure.NewDecoder(decCfg); err != nil {
-		return nil, fmt.Errorf("mapstructure decoder: %w", err)
-	} else if err = dec.Decode(base.AllSettings()); err != nil {
-		return nil, fmt.Errorf("decode config: %w", err)
-	}
-	potentialTemplates := []*string{
-		&cfg.Common.Cache.Cluster.MemberList.NodeName,
-		&cfg.Common.Cache.Cluster.MemberList.BindAddr,
-		&cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr,
-		&cfg.Common.Cache.Doppio.BindAddr,
-	}
-	root := template.New("")
-	root.Funcs(sprig.FuncMap())
-	root.Funcs(template.FuncMap{
-		"hostname": func(args ...string) (string, error) {
-			if s, err := os.Hostname(); err != nil {
-				return "", err
-			} else {
-				return strings.Split(s, ".")[0], nil
-			}
-		},
-		"ip": func() (string, error) {
-			return defaultBindAddress()
-		},
-	})
-	for _, t := range potentialTemplates {
-		if t == nil {
-			continue
-		}
-		if strings.Contains(*t, "{{") && strings.Contains(*t, "}}") {
-			if tmpl, err := root.Parse(*t); err != nil {
-				continue
-			} else {
-				buf := new(bytes.Buffer)
-				if err = tmpl.Execute(buf, struct{}{}); err != nil {
-					continue
-				} else {
-					*t = buf.String()
-				}
-			}
-		}
+
+	if err := base.Unmarshal(cfg, func(vc *mapstructure.DecoderConfig) {
+		vc.DecodeHook = hooks
+	}); err != nil {
+		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
 	return cfg, nil
+}
+
+func newRootTemplate(ipFunc func() (string, error)) *template.Template {
+	return template.New("").
+		Funcs(sprig.FuncMap()).
+		Funcs(template.FuncMap{
+			"hostname": func(args ...string) (string, error) {
+				if s, err := os.Hostname(); err != nil {
+					return "", err
+				} else {
+					return strings.Split(s, ".")[0], nil
+				}
+			},
+			"ip": func() (string, error) {
+				return ipFunc()
+			},
+		})
+}
+
+func TemplateUnmarshallerHookFunc(root *template.Template) mapstructure.DecodeHookFuncType {
+	return func(f reflect.Type, t reflect.Type, data any) (any, error) {
+		if f.Kind() != reflect.String {
+			return data, nil
+		}
+
+		sdata := data.(string)
+		if strings.Contains(sdata, "{{") && strings.Contains(sdata, "}}") {
+			if tmpl, err := root.Parse(sdata); err != nil {
+				return data, nil
+			} else {
+				buf := new(bytes.Buffer)
+				if err = tmpl.Execute(buf, struct{}{}); err != nil {
+					return data, nil
+				} else {
+					return buf.String(), nil
+				}
+			}
+		}
+
+		return data, nil
+	}
 }
 
 func TextUnmarshallerHookFunc() mapstructure.DecodeHookFuncType {
@@ -209,44 +287,287 @@ func TextUnmarshallerHookFunc() mapstructure.DecodeHookFuncType {
 	}
 }
 
-// defaultBindAddress returns the first non-loopback, non-docker-bridge IPv4 address.
-func defaultBindAddress() (string, error) {
-	validCIDRs := []string{
-		"10.0.0.0/8",
-		"172.0.0.0/8",
-		"192.0.0.0/8",
-	} // Acceptable LAN IPs
-	ipnets := make([]*net.IPNet, 0)
-	for _, validCIDR := range validCIDRs {
-		_, ipnet, _ := net.ParseCIDR(validCIDR)
-		ipnets = append(ipnets, ipnet)
+func RecursiveStructToMapHookFunc(root *template.Template) mapstructure.DecodeHookFunc {
+	var toMap func(val reflect.Value) any
+
+	toMap = func(val reflect.Value) any {
+		if !val.IsValid() {
+			return nil
+		}
+
+		// Preserve *time.Time
+		if val.Type().AssignableTo(tyTimePtr) {
+			return val.Interface()
+		}
+
+		// Handle time.Time value
+		if val.Type().AssignableTo(tyTime) {
+			v := val.Interface().(time.Time)
+			return &v
+		}
+
+		// Handle pointer dereferencing carefully
+		deref := false
+		for val.Kind() == reflect.Ptr {
+			if val.IsNil() {
+				return nil
+			}
+
+			// If it's a pointer to struct, traverse the struct deeply,
+			// but don't flatten pointer shape. This fixes nested pointers.
+			if val.Elem().Kind() == reflect.Struct {
+				return toMap(val.Elem())
+			}
+
+			deref = true
+			val = val.Elem()
+		}
+
+		switch val.Kind() {
+		case reflect.Array:
+			n := val.Len()
+			out := make([]any, n)
+			for i := 0; i < n; i++ {
+				out[i] = toMap(val.Index(i))
+			}
+			return out // arrays treated as []any for mapstructure
+
+		case reflect.Slice:
+			n := val.Len()
+			out := make([]any, n)
+			for i := 0; i < n; i++ {
+				out[i] = toMap(val.Index(i))
+			}
+			if deref {
+				return &out
+			}
+			return out
+
+		case reflect.Map:
+			out := make(map[string]any)
+			for _, key := range val.MapKeys() {
+				out[key.String()] = toMap(val.MapIndex(key))
+			}
+			if deref {
+				return &out
+			}
+			return out
+
+		case reflect.Struct:
+			m := make(map[string]any)
+			vtype := val.Type()
+
+			for i := 0; i < vtype.NumField(); i++ {
+				field := vtype.Field(i)
+				if !field.IsExported() {
+					continue
+				}
+
+				tag := field.Tag.Get("mapstructure")
+				tagParts := strings.Split(tag, ",")
+				squash := field.Anonymous
+				omitEmpty := false
+				key := field.Name
+				maybeTemplate := false
+
+				for _, part := range tagParts {
+					switch part {
+					case "omitempty":
+						omitEmpty = true
+					case "squash":
+						squash = true
+					case "template":
+						maybeTemplate = field.Type.Kind() == reflect.String
+					default:
+						if part != "" && part != "-" {
+							key = part
+						}
+					}
+				}
+
+				fv := val.Field(i)
+				if maybeTemplate {
+					if idx := strings.Index(fv.String(), "{{"); idx > 0 && strings.Index(fv.String(), "}}") > idx {
+						if tmpl, err := root.Parse(fv.String()); err != nil {
+							continue
+						} else {
+							buf := new(bytes.Buffer)
+							if err = tmpl.Execute(buf, struct{}{}); err != nil {
+								continue
+							} else {
+								fv.SetString(buf.String())
+							}
+						}
+					}
+				}
+				processed := toMap(fv)
+
+				if squash {
+					// Flatten embedded structs
+					rv := reflect.ValueOf(processed)
+					if rv.IsValid() && rv.Kind() == reflect.Ptr {
+						if !rv.IsNil() {
+							rv = rv.Elem()
+							processed = rv.Interface()
+						} else {
+							continue
+						}
+					}
+
+					if processedMap, ok := processed.(map[string]any); ok {
+						for k, v := range processedMap {
+							m[k] = v
+						}
+						continue
+					}
+				}
+
+				// Handle omitempty
+				if omitEmpty && isEmptyValue(reflect.ValueOf(processed)) {
+					continue
+				}
+
+				m[key] = processed
+			}
+
+			if deref {
+				return &m
+			}
+			return m
+
+		default:
+			if deref {
+				v := val.Interface()
+				return &v
+			}
+			return val.Interface()
+		}
 	}
 
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, addrerr := iface.Addrs()
-		if addrerr != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			ip := extractIP(addr)
-			if ip == nil || ip.IsLoopback() || ip.To4() == nil {
-				continue
+	return func(from reflect.Value, to reflect.Value) (any, error) {
+		fv := from
+		for fv.Kind() == reflect.Ptr {
+			if fv.IsNil() {
+				return nil, nil
 			}
-			if slices.ContainsFunc(ipnets, func(ipNet *net.IPNet) bool {
-				return ipNet.Contains(ip)
-			}) {
-				return ip.String(), nil
+			fv = fv.Elem()
+		}
+
+		if fv.Kind() != reflect.Struct {
+			return from.Interface(), nil
+		}
+		return toMap(from), nil
+	}
+}
+
+// Helper for omitempty
+func isEmptyValue(v reflect.Value) bool {
+	if !v.IsValid() {
+		return true
+	}
+	switch v.Kind() {
+	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+		return v.Len() == 0
+	case reflect.Bool:
+		return !v.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return v.Int() == 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return v.Uint() == 0
+	case reflect.Float32, reflect.Float64:
+		return v.Float() == 0
+	case reflect.Interface, reflect.Ptr:
+		return v.IsNil()
+	case reflect.Struct:
+		// special-case time.Time
+		if v.Type() == tyTime {
+			return v.Interface().(time.Time).IsZero()
+		}
+	default:
+	}
+	return false
+}
+
+func hasAnyPrefix(prefixes []*regexp.Regexp, ss ...string) bool {
+	for _, str := range ss {
+		matched := false
+		for _, p := range prefixes {
+			if ok, err := p.MatchString(str); err == nil && ok {
+				matched = true
+				break
 			}
 		}
+		if !matched {
+			return false
+		}
 	}
-	return "", errors.New("no suitable LAN IPv4 address found")
+
+	return true
+}
+
+// defaultBindAddress returns the first non-loopback, non-docker-bridge IPv4 address.
+func defaultBindAddress(validCIDRs []string, ifacePrefixPriority []*regexp.Regexp) func() (string, error) {
+	return func() (string, error) {
+		bindAddressOnce.Do(func() {
+			l := log.Default()
+			if len(validCIDRs) == 0 {
+				validCIDRs = bindFilter
+			}
+
+			ipnets := make([]*net.IPNet, 0)
+			for _, validCIDR := range validCIDRs {
+				_, ipnet, _ := net.ParseCIDR(validCIDR)
+				ipnets = append(ipnets, ipnet)
+			}
+
+			ifaces, err := net.Interfaces()
+			slices.SortFunc(ifaces, func(a, b net.Interface) int {
+				if hasAnyPrefix(ifacePrefixPriority, a.Name, b.Name) {
+					return strings.Compare(a.Name, b.Name)
+				}
+				if hasAnyPrefix(ifacePrefixPriority, a.Name) {
+					return -1
+				}
+				if hasAnyPrefix(ifacePrefixPriority, b.Name) {
+					return 1
+				}
+				return strings.Compare(a.Name, b.Name)
+			})
+			l.Tracef("Checking first interface %s ", ifaces[0].Name)
+			if err != nil {
+				bindAddress, bindAddressErr = "", err
+				return
+			}
+			for _, iface := range ifaces {
+				if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+					continue
+				}
+				addrs, addrerr := iface.Addrs()
+				if addrerr != nil {
+					continue
+				}
+				for _, addr := range addrs {
+					ip := extractIP(addr)
+					if ip == nil || ip.IsLoopback() || ip.To4() == nil {
+						continue
+					}
+					if slices.ContainsFunc(ipnets, func(ipNet *net.IPNet) bool {
+						if ipNet.Contains(ip) {
+							l.Tracef("IP %s is in %s on %s", ip, ipNet, iface.Name)
+						}
+						return ipNet.Contains(ip)
+					}) {
+						bindAddress, bindAddressErr = ip.String(), nil
+						return
+					}
+				}
+			}
+			bindAddress, bindAddressErr = "", errors.New("no suitable LAN IPv4 address found")
+			return
+		})
+
+		return bindAddress, bindAddressErr
+	}
 }
 
 func extractIP(addr net.Addr) net.IP {

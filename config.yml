@@ -3,9 +3,11 @@ common:
     log:
       level: info
     size: 1_073_741_824
-    doppio:
-      bind_port: 8080
+    api:
+      bind_port: 9090
     cluster:
+      tls:
+        enabled: false
       memberlist:
         node_name: "{{ hostname }}"
         bind_address: "{{ ip }}"

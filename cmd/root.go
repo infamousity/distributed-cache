@@ -1,19 +1,20 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"strings"
 
-	"github.com/infamousity/distributed-cache/internal/cache"
-	"github.com/infamousity/distributed-cache/internal/cluster"
-	"github.com/infamousity/distributed-cache/internal/config"
-	"github.com/infamousity/distributed-cache/internal/doppio"
-	"github.com/infamousity/distributed-cache/internal/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/infamousity/distributed-cache/internal/api"
+	"github.com/infamousity/distributed-cache/internal/cluster"
+	"github.com/infamousity/distributed-cache/internal/config"
+	"github.com/infamousity/distributed-cache/internal/log"
 )
 
 var (
@@ -48,12 +49,18 @@ var (
 				return err
 			}
 
-			l.Infof("Local node name: %s", cl.GetNode().GetSelf())
+			l.Infof("Local node name: %s, known members: [%s]", cl.GetNode().GetSelf(), strings.Join(cl.GetNode().List(), ","))
 
-			// Force early cache initialization
-			_ = cache.New()
+			if err := cl.Rebalance(); err != nil {
+				if !errors.Is(err, cluster.ErrOneNodeInCluster) {
+					l.Errorf("Failed to rebalance cache: %v", err)
+					return nil
+				}
+			} else {
+				l.Infof("Rebalanced cache")
+			}
 
-			server := doppio.New(net.JoinHostPort(cfg.Common.Cache.Doppio.BindAddr, fmt.Sprintf("%d", cfg.Common.Cache.Doppio.BindPort)), cl.GetNode())
+			server := api.New(net.JoinHostPort(cfg.Common.Cache.Http.BindAddr, fmt.Sprintf("%d", cfg.Common.Cache.Http.BindPort)), cl)
 			return server.Run()
 		},
 	}
