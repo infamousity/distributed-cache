@@ -12,24 +12,24 @@ import (
 )
 
 // Node is the interface your server and cluster code uses to add/remove members
-// and look up who owns a given key (returning the HTTPAddr for forwarding).
+// and look up who owns a given key (returning the control-plane address for forwarding).
 type Node interface {
-	Add(name, httpAddr string)                 // register a new node
+	Add(name, controlAddr string)              // register a new node
 	Remove(name string)                        // unregister a node by name
 	Get(key string) (string, bool)             // owner of key, returns Name
 	GetFromHash(hash uint64) (string, bool)    // hash of key, returns owner of key hash Name
 	GetN(key string, n int) ([]string, bool)   // top-n owners
-	GetForwardAddr(name string) (string, bool) // for the node's Name, find the forwarding address
+	GetForwardAddr(name string) (string, bool) // for the node's Name, find the control-plane address
 	List() []string                            // list of all nodes in the ring
 	LoadDistribution() map[string]float64      // exposes LoadDistribution
 	GetSelf() string                           // the ring’s “self” name (hostname)
 	GetConfig() *config.Config                 // the memberlist configuration
 }
 
-// ringMember holds exactly the HTTPAddr we want to forward to.
+// ringMember holds exactly the control-plane address we want to forward to.
 type ringMember struct {
-	Name     string
-	HTTPAddr string
+	Name        string
+	ControlAddr string
 }
 
 // String() is used by consistent to identify a member; we return the HTTP Addr
@@ -57,16 +57,22 @@ func NewHashRing(selfName string, c *config.Config) Node {
 	if c.Common.Cache.Cluster.MemberList.PartitionCount == 0 {
 		c.Common.Cache.Cluster.MemberList.PartitionCount = consistent.DefaultPartitionCount
 	}
+	replicationFactor := c.Common.Cache.Cluster.MemberList.ReplicationFactor
+	if replicationFactor < 2 {
+		// consistent panics with replicationFactor=1 when there is only a single member.
+		// We clamp to 2 to keep single-node startup safe.
+		replicationFactor = 2
+	}
 	cfg := consistent.Config{
 		PartitionCount:    c.Common.Cache.Cluster.MemberList.PartitionCount,
-		ReplicationFactor: 3,
+		ReplicationFactor: replicationFactor,
 		Load:              1.25,
 		Hasher:            hasher{},
 	}
-	httpAddr := fmt.Sprintf("%s:%d", c.Common.Cache.Http.BindAddr, c.Common.Cache.Http.BindPort)
+	controlAddr := fmt.Sprintf("%s:%d", c.Common.Cache.Control.BindAddr, c.Common.Cache.Control.BindPort)
 	r := &ring{
 		hash: consistent.New([]consistent.Member{
-			ringMember{Name: selfName, HTTPAddr: httpAddr},
+			ringMember{Name: selfName, ControlAddr: controlAddr},
 		}, cfg),
 		self: selfName,
 		cfg:  c,
@@ -75,7 +81,7 @@ func NewHashRing(selfName string, c *config.Config) Node {
 	return r
 }
 
-func (r *ring) Add(name, httpAddr string) {
+func (r *ring) Add(name, controlAddr string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -86,7 +92,7 @@ func (r *ring) Add(name, httpAddr string) {
 			break
 		}
 	}
-	r.hash.Add(ringMember{Name: name, HTTPAddr: httpAddr})
+	r.hash.Add(ringMember{Name: name, ControlAddr: controlAddr})
 }
 
 func (r *ring) Remove(name string) {
@@ -130,7 +136,7 @@ func (r *ring) GetForwardAddr(name string) (string, bool) {
 
 	for _, m := range r.hash.GetMembers() {
 		if rm := m.(ringMember); rm.Name == name {
-			return rm.HTTPAddr, true
+			return rm.ControlAddr, true
 		}
 	}
 
@@ -177,4 +183,11 @@ func (r *ring) GetSelf() string {
 
 func (r *ring) GetConfig() *config.Config {
 	return r.cfg
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

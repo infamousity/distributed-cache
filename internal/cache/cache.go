@@ -1,89 +1,209 @@
 package cache
 
 import (
-	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
-	"github.com/dgraph-io/ristretto/v2/z"
 )
 
-type Cache = ristretto.Cache[string, any]
-
-type Item[V any] ristretto.Item[any]
-
-var (
-	cacheInstance *Cache
-	once          sync.Once
+const (
+	defaultMaxMetadataEntries = 1_000_000
+	metadataCleanupScanLimit  = 64
 )
 
-func New() *Cache {
-	once.Do(func() {
-		c, err := ristretto.NewCache[string, any](&ristretto.Config[string, any]{
-			NumCounters: 1e7,
-			MaxCost:     1 << 30,
-			BufferItems: 64,
-		})
-		if err != nil {
-			log.Fatalf("failed to create ristretto cache: %v", err)
-		}
-		cacheInstance = c
+type Store struct {
+	mu             sync.Mutex
+	cache          *ristretto.Cache[string, Entry]
+	meta           map[string]entryMeta
+	maxMetaEntries int
+}
+
+type Entry struct {
+	Value     []byte
+	Version   uint64
+	Tombstone bool
+}
+
+type entryMeta struct {
+	version   uint64
+	tombstone bool
+	expiresAt time.Time
+}
+
+func NewStore(maxCost int64) (*Store, error) {
+	if maxCost <= 0 {
+		return nil, fmt.Errorf("maxCost must be > 0")
+	}
+	c, err := ristretto.NewCache[string, Entry](&ristretto.Config[string, Entry]{
+		NumCounters: 1e7,
+		MaxCost:     maxCost,
+		BufferItems: 64,
 	})
-	return cacheInstance
-}
-
-type ItemDTO[V any] struct {
-	Key        string
-	Value      V
-	Cost       int64
-	Expiration FlexibleTime
-}
-
-func (x *ItemDTO[V]) ToItem() *Item[V] {
-	keyHash, cHash := z.KeyToHash(x.Key)
-	eTime := time.Time{}
-	if !x.Expiration.IsZero() {
-		eTime = x.Expiration.Time
+	if err != nil {
+		return nil, fmt.Errorf("create ristretto cache: %w", err)
 	}
-	return &Item[V]{
-		Key:        keyHash,
-		Conflict:   cHash,
-		Value:      x.Value,
-		Cost:       x.Cost,
-		Expiration: eTime,
+	return &Store{
+		cache:          c,
+		meta:           make(map[string]entryMeta),
+		maxMetaEntries: defaultMaxMetadataEntries,
+	}, nil
+}
+
+func (s *Store) Get(key string) ([]byte, bool) {
+	entry, ok := s.GetEntry(key)
+	if !ok {
+		return nil, false
 	}
+	if entry.Tombstone {
+		return nil, false
+	}
+	return entry.Value, true
 }
 
-type FlexibleTime struct {
-	time.Time
+func (s *Store) GetEntry(key string) (Entry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if s.expireKeyLocked(key, now) {
+		return Entry{}, false
+	}
+	meta, metaOK := s.meta[key]
+	if metaOK && meta.tombstone {
+		return Entry{Version: meta.version, Tombstone: true}, true
+	}
+	entry, ok := s.cache.Get(key)
+	if !ok {
+		return Entry{}, false
+	}
+	if metaOK {
+		entry.Version = meta.version
+		entry.Tombstone = meta.tombstone
+	}
+	entry.Value = cloneBytes(entry.Value)
+	return entry, true
 }
 
-func (ft *FlexibleTime) UnmarshalJSON(data []byte) error {
-	// Try to unmarshal as string (RFC3339)
-	var s string
-	if err := json.Unmarshal(data, &s); err == nil {
-		parsed, perr := time.Parse(time.RFC3339, s)
-		if perr != nil {
-			return fmt.Errorf("invalid RFC3339 time: %w", perr)
+func (s *Store) Set(key string, value []byte, ttl time.Duration) bool {
+	return s.SetVersioned(key, value, ttl, uint64(time.Now().UnixNano()))
+}
+
+func (s *Store) SetVersioned(key string, value []byte, ttl time.Duration, version uint64) bool {
+	return s.put(key, Entry{
+		Value:   cloneBytes(value),
+		Version: version,
+	}, ttl)
+}
+
+func (s *Store) DeleteVersioned(key string, version uint64, tombstoneTTL time.Duration) bool {
+	return s.put(key, Entry{
+		Version:   version,
+		Tombstone: true,
+	}, tombstoneTTL)
+}
+
+func (s *Store) put(key string, entry Entry, ttl time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	s.expireKeyLocked(key, now)
+	nextMeta := entryMeta{
+		version:   entry.Version,
+		tombstone: entry.Tombstone,
+		expiresAt: expiresAtForTTL(now, ttl),
+	}
+	if current, ok := s.meta[key]; ok && metaIsOlder(nextMeta, current) {
+		return true
+	}
+	if _, ok := s.meta[key]; !ok && len(s.meta) >= s.maxMetaEntries {
+		s.cleanupSomeExpiredLocked(now)
+		if len(s.meta) >= s.maxMetaEntries {
+			return false
 		}
-		ft.Time = parsed
-		return nil
 	}
-
-	// Try to unmarshal as number (Unix timestamp)
-	var ts int64
-	if err := json.Unmarshal(data, &ts); err == nil {
-		ft.Time = time.Unix(ts, 0)
-		return nil
+	cost := int64(len(entry.Value))
+	if entry.Tombstone {
+		cost = 1
 	}
-
-	return fmt.Errorf("invalid time format: must be RFC3339 string or Unix timestamp")
+	var ok bool
+	if ttl > 0 {
+		ok = s.cache.SetWithTTL(key, entry, cost, ttl)
+	} else {
+		ok = s.cache.Set(key, entry, cost)
+	}
+	if ok {
+		s.cache.Wait()
+		s.meta[key] = nextMeta
+		s.cleanupSomeExpiredLocked(now)
+	}
+	return ok
 }
 
-func (ft FlexibleTime) MarshalJSON() ([]byte, error) {
-	// Default to RFC3339 string for output
-	return json.Marshal(ft.Time.Format(time.RFC3339))
+func (s *Store) Del(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cache.Del(key)
+	delete(s.meta, key)
+}
+
+func (s *Store) Close() {
+	s.cache.Close()
+}
+
+func cloneBytes(value []byte) []byte {
+	if value == nil {
+		return nil
+	}
+	out := make([]byte, len(value))
+	copy(out, value)
+	return out
+}
+
+func isOlder(next, current Entry) bool {
+	if next.Version < current.Version {
+		return true
+	}
+	if next.Version > current.Version {
+		return false
+	}
+	return current.Tombstone && !next.Tombstone
+}
+
+func metaIsOlder(next, current entryMeta) bool {
+	if next.version < current.version {
+		return true
+	}
+	if next.version > current.version {
+		return false
+	}
+	return current.tombstone && !next.tombstone
+}
+
+func expiresAtForTTL(now time.Time, ttl time.Duration) time.Time {
+	if ttl <= 0 {
+		return time.Time{}
+	}
+	return now.Add(ttl)
+}
+
+func (s *Store) expireKeyLocked(key string, now time.Time) bool {
+	meta, ok := s.meta[key]
+	if !ok || meta.expiresAt.IsZero() || meta.expiresAt.After(now) {
+		return false
+	}
+	delete(s.meta, key)
+	s.cache.Del(key)
+	return true
+}
+
+func (s *Store) cleanupSomeExpiredLocked(now time.Time) {
+	scanned := 0
+	for key := range s.meta {
+		if scanned >= metadataCleanupScanLimit {
+			return
+		}
+		scanned++
+		s.expireKeyLocked(key, now)
+	}
 }

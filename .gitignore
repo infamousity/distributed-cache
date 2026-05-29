@@ -2,6 +2,7 @@
 !/.gitignore
 !/.env
 !*.go
+!*.proto
 !go.sum
 !go.mod
 !README.md

@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package control;
+
+option go_package = "github.com/infamousity/distributed-cache/internal/controlpb;controlpb";
+
+enum WriteConcern {
+  WRITE_CONCERN_ONE = 0;
+  WRITE_CONCERN_MAJORITY = 1;
+  WRITE_CONCERN_REPLICA = 2;
+}
+
+service ControlPlane {
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc Fetch(FetchRequest) returns (FetchResponse);
+  rpc Store(StoreRequest) returns (StoreResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}
+
+message PingRequest {}
+message PingResponse {
+  string node_name = 1;
+}
+
+message FetchRequest {
+  string key = 1;
+}
+message FetchResponse {
+  bool found = 1;
+  bytes value = 2;
+  uint64 version = 3;
+  bool tombstone = 4;
+}
+
+message StoreRequest {
+  string key = 1;
+  bytes value = 2;
+  int64 ttl_ms = 3;
+  WriteConcern write_concern = 4;
+  uint64 version = 5;
+}
+message StoreResponse {
+  bool ok = 1;
+}
+
+message DeleteRequest {
+  string key = 1;
+  WriteConcern write_concern = 2;
+  uint64 version = 3;
+}
+message DeleteResponse {
+  bool ok = 1;
+}

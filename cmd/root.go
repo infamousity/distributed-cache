@@ -1,19 +1,17 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/infamousity/distributed-cache/internal/api"
-	"github.com/infamousity/distributed-cache/internal/cluster"
-	"github.com/infamousity/distributed-cache/internal/config"
+	"github.com/infamousity/distributed-cache/cache"
 	"github.com/infamousity/distributed-cache/internal/log"
 )
 
@@ -37,31 +35,17 @@ var (
 			l := log.Default()
 
 			configFiles := viper.GetStringSlice("config_files")
-			cfg, err := config.Load(configFiles...)
+			dc, err := cache.StartFromConfigFiles(configFiles...)
 			if err != nil {
-				l.Errorf("Failed to load config: %v", err)
+				l.Errorf("Failed to start cache: %v", err)
 				return err
 			}
+			l.Infof("Local node name: %s", dc.NodeName())
 
-			cl, err := cluster.NewCluster(cfg)
-			if err != nil {
-				l.Errorf("Failed to initialize cluster: %v", err)
-				return err
-			}
-
-			l.Infof("Local node name: %s, known members: [%s]", cl.GetNode().GetSelf(), strings.Join(cl.GetNode().List(), ","))
-
-			if err := cl.Rebalance(); err != nil {
-				if !errors.Is(err, cluster.ErrOneNodeInCluster) {
-					l.Errorf("Failed to rebalance cache: %v", err)
-					return nil
-				}
-			} else {
-				l.Infof("Rebalanced cache")
-			}
-
-			server := api.New(net.JoinHostPort(cfg.Common.Cache.Http.BindAddr, fmt.Sprintf("%d", cfg.Common.Cache.Http.BindPort)), cl)
-			return server.Run()
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			<-sigCh
+			return dc.Close()
 		},
 	}
 )

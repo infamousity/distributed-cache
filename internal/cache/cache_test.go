@@ -1,0 +1,266 @@
+package cache
+
+import (
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestStoreSetIsImmediatelyReadable(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if ok := store.Set("k", []byte("v"), time.Minute); !ok {
+		t.Fatalf("set returned false")
+	}
+	value, found := store.Get("k")
+	if !found {
+		t.Fatalf("expected immediate hit")
+	}
+	if string(value) != "v" {
+		t.Fatalf("value=%q, want v", value)
+	}
+}
+
+func TestStoreCopiesValuesAtBoundary(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	original := []byte("value")
+	if ok := store.Set("k", original, time.Minute); !ok {
+		t.Fatalf("set returned false")
+	}
+	original[0] = 'X'
+
+	value, found := store.Get("k")
+	if !found {
+		t.Fatalf("expected hit")
+	}
+	if string(value) != "value" {
+		t.Fatalf("stored value changed through input slice: %q", value)
+	}
+
+	value[1] = 'X'
+	value, found = store.Get("k")
+	if !found {
+		t.Fatalf("expected hit")
+	}
+	if string(value) != "value" {
+		t.Fatalf("stored value changed through returned slice: %q", value)
+	}
+}
+
+func TestStoreTombstoneRejectsOlderWrite(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if ok := store.SetVersioned("k", []byte("old"), time.Minute, 10); !ok {
+		t.Fatalf("initial set returned false")
+	}
+	if ok := store.DeleteVersioned("k", 20, time.Minute); !ok {
+		t.Fatalf("delete returned false")
+	}
+	if ok := store.SetVersioned("k", []byte("stale"), time.Minute, 10); !ok {
+		t.Fatalf("stale set returned false")
+	}
+
+	if value, found := store.Get("k"); found {
+		t.Fatalf("stale write resurrected value %q", value)
+	}
+	entry, found := store.GetEntry("k")
+	if !found {
+		t.Fatalf("expected retained tombstone")
+	}
+	if !entry.Tombstone || entry.Version != 20 {
+		t.Fatalf("entry=%+v, want tombstone version 20", entry)
+	}
+}
+
+func TestStoreNewerWriteReplacesTombstone(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if ok := store.DeleteVersioned("k", 20, time.Minute); !ok {
+		t.Fatalf("delete returned false")
+	}
+	if ok := store.SetVersioned("k", []byte("new"), time.Minute, 30); !ok {
+		t.Fatalf("newer set returned false")
+	}
+
+	value, found := store.Get("k")
+	if !found {
+		t.Fatalf("expected newer value")
+	}
+	if string(value) != "new" {
+		t.Fatalf("value=%q, want new", value)
+	}
+}
+
+func TestStoreConcurrentOlderWriteCannotBeatNewerTombstone(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if ok := store.SetVersioned("k", []byte("old"), time.Minute, 10); !ok {
+		t.Fatalf("initial set returned false")
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = store.SetVersioned("k", []byte("stale"), time.Minute, 10)
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		_ = store.DeleteVersioned("k", 20, time.Minute)
+	}()
+	close(start)
+	wg.Wait()
+
+	entry, found := store.GetEntry("k")
+	if !found {
+		t.Fatalf("expected retained entry")
+	}
+	if !entry.Tombstone || entry.Version != 20 {
+		t.Fatalf("entry=%+v, want tombstone version 20", entry)
+	}
+}
+
+func TestStoreTombstoneMetadataSurvivesPayloadEviction(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if ok := store.DeleteVersioned("k", 20, time.Minute); !ok {
+		t.Fatalf("delete returned false")
+	}
+	store.cache.Del("k")
+
+	if ok := store.SetVersioned("k", []byte("stale"), time.Minute, 10); !ok {
+		t.Fatalf("stale set returned false")
+	}
+	entry, found := store.GetEntry("k")
+	if !found {
+		t.Fatalf("expected metadata tombstone")
+	}
+	if !entry.Tombstone || entry.Version != 20 {
+		t.Fatalf("entry=%+v, want tombstone version 20", entry)
+	}
+}
+
+func TestStoreMetadataExpiresAfterRetention(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if ok := store.DeleteVersioned("k", 20, 10*time.Millisecond); !ok {
+		t.Fatalf("delete returned false")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if entry, found := store.GetEntry("k"); found {
+		t.Fatalf("expected expired metadata, got %+v", entry)
+	}
+
+	if ok := store.SetVersioned("k", []byte("after-expiry"), time.Minute, 10); !ok {
+		t.Fatalf("set after expiry returned false")
+	}
+	value, found := store.Get("k")
+	if !found || string(value) != "after-expiry" {
+		t.Fatalf("value=%q found=%v, want after-expiry", value, found)
+	}
+}
+
+func TestStoreGetEntryExpiresOnlyRequestedKey(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	store.mu.Lock()
+	store.meta["expired-other"] = entryMeta{version: 1, expiresAt: now.Add(-time.Hour)}
+	store.meta["target"] = entryMeta{version: 2, tombstone: true, expiresAt: now.Add(time.Hour)}
+	store.mu.Unlock()
+
+	entry, found := store.GetEntry("target")
+	if !found {
+		t.Fatalf("expected target tombstone")
+	}
+	if !entry.Tombstone || entry.Version != 2 {
+		t.Fatalf("entry=%+v, want tombstone version 2", entry)
+	}
+
+	store.mu.Lock()
+	_, otherPresent := store.meta["expired-other"]
+	store.mu.Unlock()
+	if !otherPresent {
+		t.Fatalf("GetEntry cleaned unrelated expired metadata")
+	}
+}
+
+func TestStorePutExpiresRequestedKeyBeforeCompare(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if ok := store.DeleteVersioned("k", 20, 10*time.Millisecond); !ok {
+		t.Fatalf("delete returned false")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if ok := store.SetVersioned("k", []byte("after-expiry"), time.Minute, 10); !ok {
+		t.Fatalf("set after requested-key expiry returned false")
+	}
+	value, found := store.Get("k")
+	if !found || string(value) != "after-expiry" {
+		t.Fatalf("value=%q found=%v, want after-expiry", value, found)
+	}
+}
+
+func TestStoreMetadataCapCleansExpiredEntriesBoundedly(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	store.mu.Lock()
+	store.maxMetaEntries = 1
+	store.meta["expired"] = entryMeta{version: 1, expiresAt: time.Now().Add(-time.Hour)}
+	store.mu.Unlock()
+
+	if ok := store.SetVersioned("new", []byte("value"), time.Minute, 2); !ok {
+		t.Fatalf("set with expired metadata at cap returned false")
+	}
+	value, found := store.Get("new")
+	if !found || string(value) != "value" {
+		t.Fatalf("value=%q found=%v, want value", value, found)
+	}
+}

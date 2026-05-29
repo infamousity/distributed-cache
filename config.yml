@@ -2,8 +2,9 @@ common:
   cache:
     log:
       level: info
-    size: 1_073_741_824
+    size_bytes: 1_073_741_824
     api:
+      bind_addr: "{{ ip }}"
       bind_port: 9090
     cluster:
       tls:
@@ -14,3 +15,4 @@ common:
         bind_port: 8946
         advertise_addr: "{{ hostname }}"
         advertise_port: 8946
+        replication_factor: 3

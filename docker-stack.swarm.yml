@@ -1,0 +1,31 @@
+version: '3.9'
+
+services:
+  app:
+    image: your-org/your-service:latest
+    networks:
+      - app_net
+      - cache_control
+    environment:
+      CACHE_CONTROL_ADDR: tasks.cache:9090
+
+  cache:
+    image: chrismoran/infamousity:distributed-cache.0
+    build: .
+    networks:
+      - cache_control
+    deploy:
+      mode: replicated
+      replicas: 3
+    environment:
+      CACHE_CLUSTER_MEMBERLIST_SEED_NODES: tasks.cache:8946
+
+networks:
+  app_net:
+    driver: overlay
+  cache_control:
+    driver: overlay
+    attachable: false
+    internal: true
+    driver_opts:
+      encrypted: "true"
