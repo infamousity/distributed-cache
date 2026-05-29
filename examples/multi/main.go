@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,9 @@ func main() {
 		gossipAddr  = flag.String("gossip-addr", "127.0.0.1", "gossip bind address")
 		gossipPort  = flag.Int("gossip-port", 8946, "gossip bind port")
 		seedNodes   = flag.String("seeds", "", "comma-delimited seed nodes host:port")
+		writer      = flag.Bool("writer", false, "write the example value from this node")
+		startupWait = flag.Duration("startup-wait", 2*time.Second, "time to wait for gossip membership before writing")
+		readEvery   = flag.Duration("read-every", 5*time.Second, "read interval")
 	)
 	flag.Parse()
 
@@ -37,6 +41,7 @@ func main() {
 		SharedKey:         "dev-shared-key",
 		ReplicationFactor: 2,
 		CacheSizeBytes:    64 << 20,
+		TombstoneTTL:      30 * time.Second,
 	})
 	if err != nil {
 		log.Fatalf("start cache: %v", err)
@@ -46,19 +51,22 @@ func main() {
 	ctx := context.Background()
 	key := "multi-key"
 
-	if *nodeName == "node-1" {
-		if err := cache.Set(ctx, key, []byte("from-node-1"), 10*time.Second); err != nil {
+	time.Sleep(*startupWait)
+	if *writer {
+		value := []byte("from-" + *nodeName + "-at-" + strconv.FormatInt(time.Now().Unix(), 10))
+		if err := cache.Set(ctx, key, value, time.Minute); err != nil {
 			log.Fatalf("set: %v", err)
 		}
-		fmt.Println("node-1 wrote value")
+		fmt.Printf("%s wrote key=%s value=%s\n", *nodeName, key, value)
 	}
 
-	time.Sleep(1 * time.Second)
-	value, found, err := cache.Get(ctx, key)
-	if err != nil {
-		log.Fatalf("get: %v", err)
+	for {
+		value, found, err := cache.Get(ctx, key)
+		if err != nil {
+			log.Printf("%s get error: %v", *nodeName, err)
+		} else {
+			fmt.Printf("%s read found=%v value=%s\n", *nodeName, found, value)
+		}
+		time.Sleep(*readEvery)
 	}
-	fmt.Printf("%s read found=%v value=%s\n", *nodeName, found, value)
-
-	select {}
 }

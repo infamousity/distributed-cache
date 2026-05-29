@@ -17,7 +17,7 @@ found=true value=world
 Terminal 1:
 
 ```bash
-go run ./examples/multi -name node-1 -control-port 9090 -gossip-port 8946
+go run ./examples/multi -name node-1 -control-port 9090 -gossip-port 8946 -writer
 ```
 
 Terminal 2:
@@ -26,8 +26,9 @@ Terminal 2:
 go run ./examples/multi -name node-2 -control-port 9091 -gossip-port 8947 -seeds 127.0.0.1:8946
 ```
 
-You should see `node-2` read the value written by `node-1` via the control-plane.
+Both nodes wait briefly for gossip membership, then `node-1` writes through the public cache API. If the key is owned by another node, the write is forwarded with owner-assigned versioning. Both terminals should then print the replicated value.
 
 Notes:
 - Ports must be unique per node when running locally.
 - `SharedKey` is hard-coded in the example and must match across nodes.
+- `TombstoneTTL` is set explicitly in the example to show the stale-delete protection window.

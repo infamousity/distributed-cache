@@ -85,13 +85,15 @@ The CLI starts a cache node using config files:
 
 ## Swarm
 
-Example cache-only stack:
+Build and push any images before using `docker stack deploy`; Swarm does not build images from `build:` directives.
+
+Example standalone cache-node stack for control-plane/cluster testing:
 
 ```bash
 docker stack deploy -c docker-compose.swarm.yml cache
 ```
 
-Example app + cache stack:
+Example app stack using the in-process cache module:
 
 ```bash
 docker stack deploy -c docker-stack.swarm.yml app
@@ -99,7 +101,8 @@ docker stack deploy -c docker-stack.swarm.yml app
 
 Notes:
 - `cache_control` is an internal, encrypted overlay network to isolate control-plane traffic.
-- Use `tasks.cache` for seed discovery inside Swarm.
+- In application stacks, each app replica embeds the cache and uses `tasks.<service>` for gossip seed discovery.
+- The public cache API is in-process; the gRPC control plane is only for node-to-node coordination.
 
 ## Health
 

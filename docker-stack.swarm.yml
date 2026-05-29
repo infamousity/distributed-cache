@@ -6,19 +6,20 @@ services:
     networks:
       - app_net
       - cache_control
-    environment:
-      CACHE_CONTROL_ADDR: tasks.cache:9090
-
-  cache:
-    image: chrismoran/infamousity:distributed-cache.0
-    build: .
-    networks:
-      - cache_control
     deploy:
       mode: replicated
       replicas: 3
     environment:
-      CACHE_CLUSTER_MEMBERLIST_SEED_NODES: tasks.cache:8946
+      # Your service should pass these through to cache.Start(Options{...}).
+      # The cache data plane is in-process; peer coordination uses the gRPC control plane.
+      CACHE_NODE_NAME: "{{.Task.Name}}"
+      CACHE_CONTROL_BIND_ADDR: "0.0.0.0"
+      CACHE_CONTROL_BIND_PORT: 9090
+      CACHE_GOSSIP_BIND_ADDR: "0.0.0.0"
+      CACHE_GOSSIP_BIND_PORT: 8946
+      CACHE_SEED_NODES: tasks.app:8946
+      CACHE_SHARED_KEY: change-me
+      CACHE_TOMBSTONE_TTL_MS: 300000
 
 networks:
   app_net:
