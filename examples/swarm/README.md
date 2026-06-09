@@ -2,37 +2,274 @@
 
 This example runs a small replicated app using the in-process cache module in Docker Swarm. Each app replica is also a cache node; there is no separate cache data-plane service.
 
-## Build
+The goal is to prove the generic runtime contracts used by the library:
+
+- each task has a unique node name
+- each task advertises a peer-reachable gossip/control address
+- peer discovery uses DNS seed refresh
+- peers verify each other through the gRPC control plane
+- reads continue through task churn
+
+The core cache code does not depend on Docker Swarm. Swarm is just one runtime profile that satisfies those contracts.
+
+The generic runtime contract is documented in the root `README.md`, with
+additional deployment notes in `docs/runtime-profiles.md`. This example only
+covers the Swarm-specific profile: `tasks.<service>` DNS seed discovery,
+task-scoped node names, and an internal overlay network for memberlist gossip,
+gRPC control-plane traffic, and example-only harness probes.
+
+## Files
+
+- `docker-stack.yml`: example Swarm stack with three app/cache replicas.
+- `app/main.go`: sample app embedding the cache and logging reads/writes.
+- Harness HTTP endpoints exposed by the sample app: `/mark`, `/set`, `/get`, `/del`, `/status`.
+- `app/Dockerfile`: image build for the sample app.
+- `chaos.sh`: example-stack proof harness for deploy, scale churn, and forced update.
+
+## Prerequisites
+
+- Docker CLI with access to a Swarm manager.
+- An initialized Swarm:
 
 ```bash
-# from repo root
-docker build -t distributed-cache-example-app:latest -f examples/swarm/app/Dockerfile .
+docker --context default swarm init
 ```
 
-For a multi-node Swarm, push the image to a registry reachable by every worker and update `image:` in `docker-stack.yml`.
+Use a different Docker context by setting `DOCKER_CONTEXT`. The proof script passes `--context` explicitly on every Docker command:
+
+```bash
+DOCKER_CONTEXT=my-swarm ./chaos.sh
+```
+
+For a single-node local Swarm, the locally built image is enough. For a multi-node Swarm, push the image to a registry reachable by every worker and update `image:` in `docker-stack.yml`.
+
+If you intentionally want to run the example on only one Swarm node, set a placement constraint. This is useful when testing against a multi-node Swarm where the example image exists only on the manager/build node:
+
+```bash
+PLACEMENT_CONSTRAINT='node.hostname == swarm-node-1' ./chaos.sh
+```
+
+## Build
+
+From the repository root:
+
+```bash
+docker --context default build -t distributed-cache-example-app:latest -f examples/swarm/app/Dockerfile .
+```
+
+For multi-node Swarm:
+
+```bash
+docker --context default tag distributed-cache-example-app:latest registry.example.com/distributed-cache-example-app:latest
+docker --context default push registry.example.com/distributed-cache-example-app:latest
+```
+
+Then set the same image in `docker-stack.yml`.
 
 ## Deploy
 
 ```bash
 cd examples/swarm
-docker stack deploy -c docker-stack.yml example
+docker --context default stack deploy -c docker-stack.yml example
 ```
 
-## Inspect
+Inspect service state:
 
 ```bash
-docker service ls
-
-docker service logs -f example_app
+docker --context default service ls
+docker --context default service ps example_app
+docker --context default service logs -f example_app
 ```
 
-You should see cache reads printing values across tasks.
+You should see one task write `swarm-key` and all tasks repeatedly read it:
 
-## Notes
+```text
+node=example_app.1... wrote key=swarm-key value=from-example_app.1...
+node=example_app.2... found=true value=from-example_app.1...
+```
 
-- The cache control-plane uses the `cache_control` overlay network which is internal and encrypted.
-- The app uses `tasks.app` for gossip seed discovery so app replicas can find each other.
-- `CACHE_NODE_NAME` uses Swarm task name for uniqueness.
-- The app chooses a non-loopback container IP for `AdvertiseAddr` unless `CACHE_ADVERTISE_ADDR` is set.
-- One replica writes after a startup delay; all replicas read through the public in-process API.
-- `CACHE_TOMBSTONE_TTL_MS` configures the stale-delete protection window.
+## Proof Harness
+
+Run:
+
+```bash
+cd examples/swarm
+DOCKER_CONTEXT=default ./chaos.sh
+```
+
+The script does the following:
+
+- verifies the selected Docker context is attached to an active Swarm node
+- builds the example image
+- deploys the `example` stack
+- waits for three running `example_app` tasks
+- marks each proof phase through the example harness HTTP surface
+- waits for the phase marker value to become readable through the harness HTTP
+  surface
+- performs active HTTP set/get/delete assertions
+- scales the service from `3 -> 1`
+- scales the service from `1 -> 3`
+- forces a rolling update
+- waits for the forced rolling update to report completion
+- checks structured status for unreachable or identity-mismatched peers
+- warns or fails on recent memberlist gossip transport degradation, depending on
+  `GOSSIP_DEGRADATION_MODE`
+
+On failure, it prints service status, task status, and recent service logs.
+
+The script is intentionally example-specific. It is not a generic production validation tool.
+
+## Useful Options
+
+```bash
+DOCKER_CONTEXT=default ./chaos.sh
+STACK_NAME=dcache ./chaos.sh
+REPLICAS=5 ./chaos.sh
+WAIT_SECONDS=180 ./chaos.sh
+STEADY_SECONDS=15 ./chaos.sh
+DEBUG_LOG_LINES=200 ./chaos.sh
+CLEANUP=1 ./chaos.sh
+IMAGE=registry.example.com/distributed-cache-example-app:latest ./chaos.sh
+PLACEMENT_CONSTRAINT='node.hostname == swarm-node-1' ./chaos.sh
+HARNESS_URL=http://127.0.0.1:18080 ./chaos.sh
+GOSSIP_DEGRADATION_MODE=fail ./chaos.sh
+```
+
+`CLEANUP=1` removes the stack when the script exits. `DEBUG_LOG_LINES` controls
+how many Docker service log lines are printed only when the harness fails; logs
+are not used for normal assertions.
+`STEADY_SECONDS` controls the quiet period before the final steady-state gossip
+check.
+If `HARNESS_URL` is not set, the script finds a running task node and calls the
+host-published harness port for that node. The default transport is
+`HARNESS_TRANSPORT=host`, which curls the node address from the machine running
+the script. Use `HARNESS_TRANSPORT=ssh` when the Docker manager can SSH to Swarm
+nodes and the node-local host port is reachable. Use
+`HARNESS_TRANSPORT=ssh-exec` when host-published ports are not reachable; it SSHes
+to the task node and runs curl inside the already-running app container. The
+stack publishes the harness with `mode: host`, not Swarm ingress, so the app
+task does not join the ingress overlay.
+`GOSSIP_DEGRADATION_MODE` accepts `off`, `warn`, or `fail`; the default is
+`warn`. This check is separate from active cache correctness. It compares
+`Status().Gossip.DegradedTotal` before and after each proof phase. Gossip
+degradation during deploy, scale, and forced update is classified as intentional
+churn when the expected topology is restored and active cache operations pass.
+The final steady-state phase uses normal `warn` or `fail` behavior because no
+membership change is expected. Gossip counters are node-local, so the harness
+compares before/after diagnostics from the same reported cache node.
+
+## API Boundary
+
+This example embeds the cache inside the app service. The library cache API is
+Go/in-process only.
+
+The published HTTP routes in this example are harness endpoints. They let the
+proof script drive writes, reads, deletes, and phase markers through Swarm
+service DNS from inside the private example overlay. They are not part of the
+cache library API.
+
+Production services may expose cache-backed routes if that is part of their
+service contract. Those routes belong to the host service and must use the
+service's authn, authz, tenant isolation, validation, rate limiting, and audit
+model.
+
+The cache control plane is private node-to-node infrastructure. Do not publish
+the gossip or gRPC control-plane ports externally.
+
+## Runtime Settings
+
+The stack uses:
+
+```yaml
+CACHE_NODE_NAME: "{{.Task.Name}}"
+CACHE_HARNESS_HTTP_BIND_ADDR: ":8080"
+CACHE_CONTROL_BIND_ADDR: "0.0.0.0"
+CACHE_CONTROL_BIND_PORT: 9090
+CACHE_GOSSIP_BIND_ADDR: "0.0.0.0"
+CACHE_GOSSIP_BIND_PORT: 8946
+CACHE_SEED_DNS_NAME: tasks.app
+CACHE_SEED_DNS_PORT: 8946
+CACHE_SHARED_KEY: dev-shared-key
+CACHE_TOMBSTONE_TTL_MS: 300000
+CACHE_VALUE_TTL_MS: 600000
+CACHE_DIAGNOSTICS_MIN_READY_PEERS: 2
+```
+
+Important details:
+
+- `tasks.app` is Swarm's task-level DNS name for the service named `app`.
+- The app chooses a container IP on the same subnet as `CACHE_SEED_DNS_NAME`
+  results for gossip and control-plane advertisement unless
+  `CACHE_ADVERTISE_ADDR` or `CACHE_CONTROL_ADVERTISE_ADDR` is set. This matters
+  when a task is attached to both the Swarm ingress network and the private
+  cache-control overlay.
+- The `cache_control` network is internal and encrypted.
+- The `cache_control` network is internal, encrypted, and not attachable. The
+  proof harness uses the app's host-published harness port instead of creating
+  one-shot containers on the overlay.
+- Memberlist gossip uses the configured gossip port for TCP and UDP traffic
+  between tasks.
+- The gRPC control plane uses the configured control-plane TCP port for
+  node-to-node cache RPCs.
+- The gossip and gRPC control-plane ports should stay on private/internal
+  networks and should not be published externally.
+- `CACHE_DIAGNOSTICS_MIN_READY_PEERS=2` means each replica expects both other
+  replicas to be verified before `Ready(ctx)` reports healthy in this three-node
+  example.
+- The first replica retries the example write until it succeeds. This keeps the proof focused on cache convergence instead of failing permanently if the one writer starts during topology churn.
+- The harness HTTP endpoint is example-only. It exists so the proof harness can issue active cache commands and phase markers; it is not part of the library API.
+
+## Harness HTTP
+
+The stack publishes the example harness HTTP surface on host port `18080` with
+host-mode publishing:
+
+```bash
+curl -fsS 'http://<task-node-address>:18080/status'
+curl -fsS -X POST 'http://<task-node-address>:18080/mark?phase=manual'
+```
+
+For environments where node host ports are reachable only from the node itself,
+the proof harness can execute curl over SSH:
+
+```bash
+DOCKER_CONTEXT=default HARNESS_TRANSPORT=ssh ./chaos.sh
+```
+
+If host-published ports are unavailable, execute curl inside the app container:
+
+```bash
+DOCKER_CONTEXT=default HARNESS_TRANSPORT=ssh-exec ./chaos.sh
+```
+
+Requests land on the replica running on the selected task node. The app then
+uses the in-process distributed cache API, so this exercises forwarded owner
+routing as well as local reads.
+
+## What This Proves
+
+This proves the example stack can:
+
+- discover peers through DNS seed refresh
+- verify peers through the control plane
+- replicate the example key
+- accept active set/get/delete harness commands through any service replica
+- keep reads working through scale churn
+- recover through forced task replacement
+
+## What This Does Not Prove Yet
+
+The current proof harness proves ordinary delete visibility through the active harness HTTP surface. It does not yet prove tombstone safety while deliberately injecting stale older-version writes.
+
+To prove delete safety next, we need one of these:
+
+- add a scripted scenario mode to the example app
+- add a second test app/job that joins the same cache cluster and issues writes/deletes
+
+That design should be discussed before expanding the example because it affects how much active harness surface we want in the sample app.
+
+## Cleanup
+
+```bash
+docker --context default stack rm example
+```

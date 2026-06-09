@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,49 +17,70 @@ import (
 
 func main() {
 	nodeName := getenv("CACHE_NODE_NAME", "app-1")
+	harnessHTTPAddr := getenv("CACHE_HARNESS_HTTP_BIND_ADDR", getenv("CACHE_HTTP_BIND_ADDR", ":8080"))
 	controlAddr := getenv("CACHE_CONTROL_BIND_ADDR", "0.0.0.0")
 	controlPort := getenvInt("CACHE_CONTROL_BIND_PORT", 9090)
 	gossipAddr := getenv("CACHE_GOSSIP_BIND_ADDR", "0.0.0.0")
 	gossipPort := getenvInt("CACHE_GOSSIP_BIND_PORT", 8946)
-	advertiseAddr := getenv("CACHE_ADVERTISE_ADDR", defaultAdvertiseAddr())
 	seedNodes := parseCSV(getenv("CACHE_SEED_NODES", ""))
+	seedDNSName := getenv("CACHE_SEED_DNS_NAME", "")
+	seedDNSPort := getenvInt("CACHE_SEED_DNS_PORT", gossipPort)
+	advertiseAddr := getenv("CACHE_ADVERTISE_ADDR", defaultAdvertiseAddr(seedDNSName))
+	controlAdvertiseAddr := getenv("CACHE_CONTROL_ADVERTISE_ADDR", net.JoinHostPort(advertiseAddr, strconv.Itoa(controlPort)))
 	sharedKey := getenv("CACHE_SHARED_KEY", "dev-shared-key")
 	startupWait := time.Duration(getenvInt("CACHE_STARTUP_WAIT_MS", 5000)) * time.Millisecond
 	tombstoneTTL := time.Duration(getenvInt("CACHE_TOMBSTONE_TTL_MS", 300000)) * time.Millisecond
+	valueTTL := time.Duration(getenvInt("CACHE_VALUE_TTL_MS", 600000)) * time.Millisecond
+	minReadyPeers := getenvInt("CACHE_DIAGNOSTICS_MIN_READY_PEERS", 0)
 
-	cache, err := dcache.Start(dcache.Options{
-		NodeName:          nodeName,
-		ControlBindAddr:   controlAddr,
-		ControlBindPort:   controlPort,
-		GossipBindAddr:    gossipAddr,
-		GossipBindPort:    gossipPort,
-		AdvertiseAddr:     advertiseAddr,
-		AdvertisePort:     gossipPort,
-		SeedNodes:         seedNodes,
-		SharedKey:         sharedKey,
-		ReplicationFactor: 3,
-		CacheSizeBytes:    64 << 20,
-		TombstoneTTL:      tombstoneTTL,
+	dc, err := dcache.Start(dcache.Options{
+		NodeName:             nodeName,
+		ControlBindAddr:      controlAddr,
+		ControlBindPort:      controlPort,
+		ControlAdvertiseAddr: controlAdvertiseAddr,
+		GossipBindAddr:       gossipAddr,
+		GossipBindPort:       gossipPort,
+		AdvertiseAddr:        advertiseAddr,
+		AdvertisePort:        gossipPort,
+		SeedNodes:            seedNodes,
+		SeedDNSName:          seedDNSName,
+		SeedDNSPort:          seedDNSPort,
+		SharedKey:            sharedKey,
+		ReplicationFactor:    3,
+		CacheSizeBytes:       64 << 20,
+		TombstoneTTL:         tombstoneTTL,
+		MinReadyPeers:        minReadyPeers,
 	})
 	if err != nil {
 		log.Fatalf("start cache: %v", err)
 	}
-	defer cache.Close()
+	defer dc.Close()
+	log.Printf("cache advertise gossip=%s:%d control=%s seed_dns=%s", advertiseAddr, gossipPort, controlAdvertiseAddr, seedDNSName)
+
+	go serveHarnessHTTP(harnessHTTPAddr, nodeName, dc, valueTTL)
 
 	ctx := context.Background()
 	key := "swarm-key"
 	time.Sleep(startupWait)
-	if isFirstReplica(nodeName) {
-		value := []byte("from-" + nodeName)
-		if err := cache.Set(ctx, key, value, time.Minute); err != nil {
-			log.Printf("set error: %v", err)
-		} else {
-			fmt.Printf("node=%s wrote key=%s value=%s\n", nodeName, key, value)
-		}
-	}
+	wrote := false
 
 	for {
-		value, found, err := cache.Get(ctx, key)
+		if isFirstReplica(nodeName) && !wrote {
+			if _, found, err := dc.Get(ctx, key); err != nil {
+				log.Printf("seed get error: %v", err)
+			} else if found {
+				wrote = true
+			} else {
+				value := []byte("from-" + nodeName)
+				if err := dc.Set(ctx, key, value, valueTTL); err != nil {
+					log.Printf("set error: %v", err)
+				} else {
+					wrote = true
+					fmt.Printf("node=%s wrote key=%s value=%s\n", nodeName, key, value)
+				}
+			}
+		}
+		value, found, err := dc.Get(ctx, key)
 		if err != nil {
 			log.Printf("get error: %v", err)
 		} else {
@@ -64,6 +88,95 @@ func main() {
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// serveHarnessHTTP is example-only. Production services that expose cache-backed
+// routes should do so through their own service API and security model.
+func serveHarnessHTTP(addr, nodeName string, dc *dcache.DistributedCache, valueTTL time.Duration) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mark", func(w http.ResponseWriter, r *http.Request) {
+		phase := r.URL.Query().Get("phase")
+		if phase == "" {
+			http.Error(w, "phase is required", http.StatusBadRequest)
+			return
+		}
+		value := []byte("phase-" + phase + "-from-" + nodeName)
+		if err := dc.Set(r.Context(), "swarm-key", value, valueTTL); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		fmt.Printf("node=%s chaos_phase=%s\n", nodeName, phase)
+		fmt.Printf("node=%s wrote key=swarm-key value=%s\n", nodeName, value)
+		writeJSON(w, map[string]any{"ok": true, "node": nodeName, "phase": phase})
+	})
+	mux.HandleFunc("/set", func(w http.ResponseWriter, r *http.Request) {
+		key := r.URL.Query().Get("key")
+		value := r.URL.Query().Get("value")
+		if key == "" {
+			http.Error(w, "key is required", http.StatusBadRequest)
+			return
+		}
+		ttl := time.Duration(getQueryInt(r, "ttl_ms", 600000)) * time.Millisecond
+		if err := dc.Set(r.Context(), key, []byte(value), ttl); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "node": nodeName})
+	})
+	mux.HandleFunc("/del", func(w http.ResponseWriter, r *http.Request) {
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			http.Error(w, "key is required", http.StatusBadRequest)
+			return
+		}
+		if err := dc.Del(r.Context(), key); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "node": nodeName})
+	})
+	mux.HandleFunc("/get", func(w http.ResponseWriter, r *http.Request) {
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			http.Error(w, "key is required", http.StatusBadRequest)
+			return
+		}
+		value, found, err := dc.Get(r.Context(), key)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"found": found,
+			"key":   key,
+			"node":  nodeName,
+			"value": string(value),
+		})
+	})
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, dc.Status())
+	})
+	log.Printf("example harness HTTP listening on %s", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Printf("harness http server error: %v", err)
+	}
+}
+
+func getQueryInt(r *http.Request, key string, def int) int {
+	v := r.URL.Query().Get(key)
+	if v == "" {
+		return def
+	}
+	out, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return out
+}
+
+func writeJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func isFirstReplica(nodeName string) bool {
@@ -108,11 +221,27 @@ func parseCSV(v string) []string {
 	return out
 }
 
-func defaultAdvertiseAddr() string {
+func defaultAdvertiseAddr(seedDNSName string) string {
+	localIPs := localInterfaceIPs()
+	if seedDNSName != "" {
+		if ip := advertiseAddrForSeedNetwork(seedDNSName, localIPs); ip != "" {
+			return ip
+		}
+	}
+	for _, local := range localIPs {
+		if ip := local.IP.To4(); ip != nil {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
+func localInterfaceIPs() []*net.IPNet {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
-		return ""
+		return nil
 	}
+	out := make([]*net.IPNet, 0, len(addrs))
 	for _, addr := range addrs {
 		ipNet, ok := addr.(*net.IPNet)
 		if !ok || ipNet.IP.IsLoopback() {
@@ -120,7 +249,27 @@ func defaultAdvertiseAddr() string {
 		}
 		ip := ipNet.IP.To4()
 		if ip != nil {
-			return ip.String()
+			out = append(out, &net.IPNet{IP: ip, Mask: ipNet.Mask})
+		}
+	}
+	return out
+}
+
+func advertiseAddrForSeedNetwork(seedDNSName string, localIPs []*net.IPNet) string {
+	seedIPs, err := net.LookupIP(seedDNSName)
+	if err != nil {
+		log.Printf("resolve seed DNS for advertise addr failed: %v", err)
+		return ""
+	}
+	for _, seedIP := range seedIPs {
+		seedIPv4 := seedIP.To4()
+		if seedIPv4 == nil {
+			continue
+		}
+		for _, local := range localIPs {
+			if local.Contains(seedIPv4) {
+				return local.IP.String()
+			}
 		}
 	}
 	return ""
