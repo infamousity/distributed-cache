@@ -17,11 +17,15 @@ type Options struct {
 	NodeName                    string
 	ControlBindAddr             string
 	ControlBindPort             int
+	ControlAdvertiseAddr        string
 	GossipBindAddr              string
 	GossipBindPort              int
 	AdvertiseAddr               string
 	AdvertisePort               int
 	SeedNodes                   []string
+	SeedDNSName                 string
+	SeedDNSPort                 int
+	SeedRefreshInterval         time.Duration
 	SharedKey                   string
 	PartitionCount              int
 	ReplicationFactor           int
@@ -32,6 +36,7 @@ type Options struct {
 	ReplicationRetryQueueSize   int
 	RepairInterval              time.Duration
 	RepairMaxKeysPerCycle       int
+	ChurnGracePeriod            time.Duration
 	TombstoneTTL                time.Duration
 	Namespace                   string
 	WriteConcern                WriteConcern
@@ -41,7 +46,9 @@ type Options struct {
 	SelfCheck                   bool
 	SelfCheckTimeout            time.Duration
 	RequireSharedKey            bool
+	AllowInsecure               bool
 	PeerWarnInterval            time.Duration
+	MinReadyPeers               int
 	TLS                         TLSOptions
 }
 
@@ -73,8 +80,14 @@ func (o Options) withDefaults() Options {
 	if o.RepairMaxKeysPerCycle == 0 {
 		o.RepairMaxKeysPerCycle = 1000
 	}
+	if o.ChurnGracePeriod == 0 {
+		o.ChurnGracePeriod = 30 * time.Second
+	}
 	if o.TombstoneTTL == 0 {
 		o.TombstoneTTL = 5 * time.Minute
+	}
+	if o.SeedRefreshInterval == 0 {
+		o.SeedRefreshInterval = 30 * time.Second
 	}
 	if o.WriteConcern == 0 {
 		o.WriteConcern = WriteConcernOne

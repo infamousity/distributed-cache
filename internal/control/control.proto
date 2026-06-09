@@ -28,8 +28,14 @@ message FetchRequest {
 message FetchResponse {
   bool found = 1;
   bytes value = 2;
-  uint64 version = 3;
+  Version version = 3;
   bool tombstone = 4;
+}
+
+message Version {
+  int64 physical = 1;
+  uint64 logical = 2;
+  string node_id = 3;
 }
 
 message StoreRequest {
@@ -37,7 +43,7 @@ message StoreRequest {
   bytes value = 2;
   int64 ttl_ms = 3;
   WriteConcern write_concern = 4;
-  uint64 version = 5;
+  Version version = 5;
 }
 message StoreResponse {
   bool ok = 1;
@@ -46,7 +52,7 @@ message StoreResponse {
 message DeleteRequest {
   string key = 1;
   WriteConcern write_concern = 2;
-  uint64 version = 3;
+  Version version = 3;
 }
 message DeleteResponse {
   bool ok = 1;

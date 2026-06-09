@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/infamousity/distributed-cache/internal/controlpb"
+	"github.com/infamousity/distributed-cache/internal/version"
 )
 
 type ClientOptions struct {
@@ -26,7 +27,7 @@ type Client struct {
 
 type Entry struct {
 	Value     []byte
-	Version   uint64
+	Version   version.Version
 	Tombstone bool
 }
 
@@ -82,32 +83,32 @@ func (c *Client) Fetch(ctx context.Context, key string) (Entry, bool, error) {
 	}
 	return Entry{
 		Value:     resp.GetValue(),
-		Version:   resp.GetVersion(),
+		Version:   fromProtoVersion(resp.GetVersion()),
 		Tombstone: resp.GetTombstone(),
 	}, resp.GetFound(), nil
 }
 
 func (c *Client) Store(ctx context.Context, key string, value []byte, ttl time.Duration, wc WriteConcern) error {
-	return c.StoreVersioned(ctx, key, value, ttl, 0, wc)
+	return c.StoreVersioned(ctx, key, value, ttl, version.Zero(), wc)
 }
 
-func (c *Client) StoreVersioned(ctx context.Context, key string, value []byte, ttl time.Duration, version uint64, wc WriteConcern) error {
+func (c *Client) StoreVersioned(ctx context.Context, key string, value []byte, ttl time.Duration, ver version.Version, wc WriteConcern) error {
 	_, err := c.client.Store(ctx, &controlpb.StoreRequest{
 		Key:          key,
 		Value:        value,
 		TtlMs:        ttlMilliseconds(ttl),
 		WriteConcern: toProtoWriteConcern(wc),
-		Version:      version,
+		Version:      toProtoVersion(ver),
 	})
 	return err
 }
 
 func (c *Client) Delete(ctx context.Context, key string, wc WriteConcern) error {
-	return c.DeleteVersioned(ctx, key, 0, wc)
+	return c.DeleteVersioned(ctx, key, version.Zero(), wc)
 }
 
-func (c *Client) DeleteVersioned(ctx context.Context, key string, version uint64, wc WriteConcern) error {
-	_, err := c.client.Delete(ctx, &controlpb.DeleteRequest{Key: key, WriteConcern: toProtoWriteConcern(wc), Version: version})
+func (c *Client) DeleteVersioned(ctx context.Context, key string, ver version.Version, wc WriteConcern) error {
+	_, err := c.client.Delete(ctx, &controlpb.DeleteRequest{Key: key, WriteConcern: toProtoWriteConcern(wc), Version: toProtoVersion(ver)})
 	return err
 }
 
@@ -120,4 +121,18 @@ func ttlMilliseconds(ttl time.Duration) int64 {
 		return 1
 	}
 	return ms
+}
+
+func toProtoVersion(ver version.Version) *controlpb.Version {
+	if ver.IsZero() {
+		return nil
+	}
+	return &controlpb.Version{Physical: ver.Physical, Logical: ver.Logical, NodeId: ver.NodeID}
+}
+
+func fromProtoVersion(ver *controlpb.Version) version.Version {
+	if ver == nil {
+		return version.Zero()
+	}
+	return version.Version{Physical: ver.GetPhysical(), Logical: ver.GetLogical(), NodeID: ver.GetNodeId()}
 }

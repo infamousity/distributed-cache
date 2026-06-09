@@ -198,7 +198,7 @@ type FetchResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Found         bool                   `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
 	Value         []byte                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
-	Version       uint64                 `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`
+	Version       *Version               `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
 	Tombstone     bool                   `protobuf:"varint,4,opt,name=tombstone,proto3" json:"tombstone,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -248,11 +248,11 @@ func (x *FetchResponse) GetValue() []byte {
 	return nil
 }
 
-func (x *FetchResponse) GetVersion() uint64 {
+func (x *FetchResponse) GetVersion() *Version {
 	if x != nil {
 		return x.Version
 	}
-	return 0
+	return nil
 }
 
 func (x *FetchResponse) GetTombstone() bool {
@@ -262,20 +262,80 @@ func (x *FetchResponse) GetTombstone() bool {
 	return false
 }
 
+type Version struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Physical      int64                  `protobuf:"varint,1,opt,name=physical,proto3" json:"physical,omitempty"`
+	Logical       uint64                 `protobuf:"varint,2,opt,name=logical,proto3" json:"logical,omitempty"`
+	NodeId        string                 `protobuf:"bytes,3,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Version) Reset() {
+	*x = Version{}
+	mi := &file_internal_control_control_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Version) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Version) ProtoMessage() {}
+
+func (x *Version) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_control_control_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Version.ProtoReflect.Descriptor instead.
+func (*Version) Descriptor() ([]byte, []int) {
+	return file_internal_control_control_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Version) GetPhysical() int64 {
+	if x != nil {
+		return x.Physical
+	}
+	return 0
+}
+
+func (x *Version) GetLogical() uint64 {
+	if x != nil {
+		return x.Logical
+	}
+	return 0
+}
+
+func (x *Version) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
 type StoreRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
 	Value         []byte                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
 	TtlMs         int64                  `protobuf:"varint,3,opt,name=ttl_ms,json=ttlMs,proto3" json:"ttl_ms,omitempty"`
 	WriteConcern  WriteConcern           `protobuf:"varint,4,opt,name=write_concern,json=writeConcern,proto3,enum=control.WriteConcern" json:"write_concern,omitempty"`
-	Version       uint64                 `protobuf:"varint,5,opt,name=version,proto3" json:"version,omitempty"`
+	Version       *Version               `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StoreRequest) Reset() {
 	*x = StoreRequest{}
-	mi := &file_internal_control_control_proto_msgTypes[4]
+	mi := &file_internal_control_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -287,7 +347,7 @@ func (x *StoreRequest) String() string {
 func (*StoreRequest) ProtoMessage() {}
 
 func (x *StoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_control_control_proto_msgTypes[4]
+	mi := &file_internal_control_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -300,7 +360,7 @@ func (x *StoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoreRequest.ProtoReflect.Descriptor instead.
 func (*StoreRequest) Descriptor() ([]byte, []int) {
-	return file_internal_control_control_proto_rawDescGZIP(), []int{4}
+	return file_internal_control_control_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *StoreRequest) GetKey() string {
@@ -331,11 +391,11 @@ func (x *StoreRequest) GetWriteConcern() WriteConcern {
 	return WriteConcern_WRITE_CONCERN_ONE
 }
 
-func (x *StoreRequest) GetVersion() uint64 {
+func (x *StoreRequest) GetVersion() *Version {
 	if x != nil {
 		return x.Version
 	}
-	return 0
+	return nil
 }
 
 type StoreResponse struct {
@@ -347,7 +407,7 @@ type StoreResponse struct {
 
 func (x *StoreResponse) Reset() {
 	*x = StoreResponse{}
-	mi := &file_internal_control_control_proto_msgTypes[5]
+	mi := &file_internal_control_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -359,7 +419,7 @@ func (x *StoreResponse) String() string {
 func (*StoreResponse) ProtoMessage() {}
 
 func (x *StoreResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_control_control_proto_msgTypes[5]
+	mi := &file_internal_control_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -372,7 +432,7 @@ func (x *StoreResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoreResponse.ProtoReflect.Descriptor instead.
 func (*StoreResponse) Descriptor() ([]byte, []int) {
-	return file_internal_control_control_proto_rawDescGZIP(), []int{5}
+	return file_internal_control_control_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *StoreResponse) GetOk() bool {
@@ -386,14 +446,14 @@ type DeleteRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
 	WriteConcern  WriteConcern           `protobuf:"varint,2,opt,name=write_concern,json=writeConcern,proto3,enum=control.WriteConcern" json:"write_concern,omitempty"`
-	Version       uint64                 `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`
+	Version       *Version               `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeleteRequest) Reset() {
 	*x = DeleteRequest{}
-	mi := &file_internal_control_control_proto_msgTypes[6]
+	mi := &file_internal_control_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -405,7 +465,7 @@ func (x *DeleteRequest) String() string {
 func (*DeleteRequest) ProtoMessage() {}
 
 func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_control_control_proto_msgTypes[6]
+	mi := &file_internal_control_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -418,7 +478,7 @@ func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
 func (*DeleteRequest) Descriptor() ([]byte, []int) {
-	return file_internal_control_control_proto_rawDescGZIP(), []int{6}
+	return file_internal_control_control_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DeleteRequest) GetKey() string {
@@ -435,11 +495,11 @@ func (x *DeleteRequest) GetWriteConcern() WriteConcern {
 	return WriteConcern_WRITE_CONCERN_ONE
 }
 
-func (x *DeleteRequest) GetVersion() uint64 {
+func (x *DeleteRequest) GetVersion() *Version {
 	if x != nil {
 		return x.Version
 	}
-	return 0
+	return nil
 }
 
 type DeleteResponse struct {
@@ -451,7 +511,7 @@ type DeleteResponse struct {
 
 func (x *DeleteResponse) Reset() {
 	*x = DeleteResponse{}
-	mi := &file_internal_control_control_proto_msgTypes[7]
+	mi := &file_internal_control_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -463,7 +523,7 @@ func (x *DeleteResponse) String() string {
 func (*DeleteResponse) ProtoMessage() {}
 
 func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_control_control_proto_msgTypes[7]
+	mi := &file_internal_control_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -476,7 +536,7 @@ func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
 func (*DeleteResponse) Descriptor() ([]byte, []int) {
-	return file_internal_control_control_proto_rawDescGZIP(), []int{7}
+	return file_internal_control_control_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DeleteResponse) GetOk() bool {
@@ -495,24 +555,28 @@ const file_internal_control_control_proto_rawDesc = "" +
 	"\fPingResponse\x12\x1b\n" +
 	"\tnode_name\x18\x01 \x01(\tR\bnodeName\" \n" +
 	"\fFetchRequest\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\"s\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\"\x85\x01\n" +
 	"\rFetchResponse\x12\x14\n" +
 	"\x05found\x18\x01 \x01(\bR\x05found\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\x04R\aversion\x12\x1c\n" +
-	"\ttombstone\x18\x04 \x01(\bR\ttombstone\"\xa3\x01\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value\x12*\n" +
+	"\aversion\x18\x03 \x01(\v2\x10.control.VersionR\aversion\x12\x1c\n" +
+	"\ttombstone\x18\x04 \x01(\bR\ttombstone\"X\n" +
+	"\aVersion\x12\x1a\n" +
+	"\bphysical\x18\x01 \x01(\x03R\bphysical\x12\x18\n" +
+	"\alogical\x18\x02 \x01(\x04R\alogical\x12\x17\n" +
+	"\anode_id\x18\x03 \x01(\tR\x06nodeId\"\xb5\x01\n" +
 	"\fStoreRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value\x12\x15\n" +
 	"\x06ttl_ms\x18\x03 \x01(\x03R\x05ttlMs\x12:\n" +
-	"\rwrite_concern\x18\x04 \x01(\x0e2\x15.control.WriteConcernR\fwriteConcern\x12\x18\n" +
-	"\aversion\x18\x05 \x01(\x04R\aversion\"\x1f\n" +
+	"\rwrite_concern\x18\x04 \x01(\x0e2\x15.control.WriteConcernR\fwriteConcern\x12*\n" +
+	"\aversion\x18\x05 \x01(\v2\x10.control.VersionR\aversion\"\x1f\n" +
 	"\rStoreResponse\x12\x0e\n" +
-	"\x02ok\x18\x01 \x01(\bR\x02ok\"w\n" +
+	"\x02ok\x18\x01 \x01(\bR\x02ok\"\x89\x01\n" +
 	"\rDeleteRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12:\n" +
-	"\rwrite_concern\x18\x02 \x01(\x0e2\x15.control.WriteConcernR\fwriteConcern\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\x04R\aversion\" \n" +
+	"\rwrite_concern\x18\x02 \x01(\x0e2\x15.control.WriteConcernR\fwriteConcern\x12*\n" +
+	"\aversion\x18\x03 \x01(\v2\x10.control.VersionR\aversion\" \n" +
 	"\x0eDeleteResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok*\\\n" +
 	"\fWriteConcern\x12\x15\n" +
@@ -538,34 +602,38 @@ func file_internal_control_control_proto_rawDescGZIP() []byte {
 }
 
 var file_internal_control_control_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_internal_control_control_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_internal_control_control_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_internal_control_control_proto_goTypes = []any{
 	(WriteConcern)(0),      // 0: control.WriteConcern
 	(*PingRequest)(nil),    // 1: control.PingRequest
 	(*PingResponse)(nil),   // 2: control.PingResponse
 	(*FetchRequest)(nil),   // 3: control.FetchRequest
 	(*FetchResponse)(nil),  // 4: control.FetchResponse
-	(*StoreRequest)(nil),   // 5: control.StoreRequest
-	(*StoreResponse)(nil),  // 6: control.StoreResponse
-	(*DeleteRequest)(nil),  // 7: control.DeleteRequest
-	(*DeleteResponse)(nil), // 8: control.DeleteResponse
+	(*Version)(nil),        // 5: control.Version
+	(*StoreRequest)(nil),   // 6: control.StoreRequest
+	(*StoreResponse)(nil),  // 7: control.StoreResponse
+	(*DeleteRequest)(nil),  // 8: control.DeleteRequest
+	(*DeleteResponse)(nil), // 9: control.DeleteResponse
 }
 var file_internal_control_control_proto_depIdxs = []int32{
-	0, // 0: control.StoreRequest.write_concern:type_name -> control.WriteConcern
-	0, // 1: control.DeleteRequest.write_concern:type_name -> control.WriteConcern
-	1, // 2: control.ControlPlane.Ping:input_type -> control.PingRequest
-	3, // 3: control.ControlPlane.Fetch:input_type -> control.FetchRequest
-	5, // 4: control.ControlPlane.Store:input_type -> control.StoreRequest
-	7, // 5: control.ControlPlane.Delete:input_type -> control.DeleteRequest
-	2, // 6: control.ControlPlane.Ping:output_type -> control.PingResponse
-	4, // 7: control.ControlPlane.Fetch:output_type -> control.FetchResponse
-	6, // 8: control.ControlPlane.Store:output_type -> control.StoreResponse
-	8, // 9: control.ControlPlane.Delete:output_type -> control.DeleteResponse
-	6, // [6:10] is the sub-list for method output_type
-	2, // [2:6] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	5, // 0: control.FetchResponse.version:type_name -> control.Version
+	0, // 1: control.StoreRequest.write_concern:type_name -> control.WriteConcern
+	5, // 2: control.StoreRequest.version:type_name -> control.Version
+	0, // 3: control.DeleteRequest.write_concern:type_name -> control.WriteConcern
+	5, // 4: control.DeleteRequest.version:type_name -> control.Version
+	1, // 5: control.ControlPlane.Ping:input_type -> control.PingRequest
+	3, // 6: control.ControlPlane.Fetch:input_type -> control.FetchRequest
+	6, // 7: control.ControlPlane.Store:input_type -> control.StoreRequest
+	8, // 8: control.ControlPlane.Delete:input_type -> control.DeleteRequest
+	2, // 9: control.ControlPlane.Ping:output_type -> control.PingResponse
+	4, // 10: control.ControlPlane.Fetch:output_type -> control.FetchResponse
+	7, // 11: control.ControlPlane.Store:output_type -> control.StoreResponse
+	9, // 12: control.ControlPlane.Delete:output_type -> control.DeleteResponse
+	9, // [9:13] is the sub-list for method output_type
+	5, // [5:9] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_internal_control_control_proto_init() }
@@ -579,7 +647,7 @@ func file_internal_control_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_control_control_proto_rawDesc), len(file_internal_control_control_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

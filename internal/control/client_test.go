@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/infamousity/distributed-cache/internal/version"
 )
 
 func TestTTLMillisecondsRoundsPositiveTTLUp(t *testing.T) {
@@ -44,18 +46,75 @@ func TestClientStoreAndDeleteSendUnassignedVersion(t *testing.T) {
 	}
 
 	storeVersion, deleteVersion := handler.versions()
-	if storeVersion != 0 {
-		t.Fatalf("store version=%d, want 0", storeVersion)
+	if !storeVersion.IsZero() {
+		t.Fatalf("store version=%s, want zero", storeVersion)
 	}
-	if deleteVersion != 0 {
-		t.Fatalf("delete version=%d, want 0", deleteVersion)
+	if !deleteVersion.IsZero() {
+		t.Fatalf("delete version=%s, want zero", deleteVersion)
+	}
+}
+
+func TestClientRoundTripsAssignedVersion(t *testing.T) {
+	assigned := version.Version{
+		Physical: 123456789,
+		Logical:  uint64(^uint32(0)) + 1,
+		NodeID:   "node-a",
+	}
+	handler := &captureHandler{
+		fetchEntry: Entry{
+			Value:     []byte("remote-value"),
+			Version:   assigned,
+			Tombstone: true,
+		},
+		fetchFound: true,
+	}
+	server, err := NewServer(handler, ServerOptions{BindAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	server.Start()
+	defer server.Stop()
+
+	client, err := Dial(server.Addr(), ClientOptions{DialTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.StoreVersioned(ctx, "k", []byte("v"), time.Second, assigned, WriteConcernMajority); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if err := client.DeleteVersioned(ctx, "k", assigned, WriteConcernMajority); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	entry, found, err := client.Fetch(ctx, "k")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if !found {
+		t.Fatal("fetch found=false, want true")
+	}
+
+	storeVersion, deleteVersion := handler.versions()
+	assertVersionEqual(t, storeVersion, assigned)
+	assertVersionEqual(t, deleteVersion, assigned)
+	assertVersionEqual(t, entry.Version, assigned)
+	if string(entry.Value) != "remote-value" {
+		t.Fatalf("fetch value=%q, want remote-value", entry.Value)
+	}
+	if !entry.Tombstone {
+		t.Fatal("fetch tombstone=false, want true")
 	}
 }
 
 type captureHandler struct {
 	mu            sync.Mutex
-	storeVersion  uint64
-	deleteVersion uint64
+	storeVersion  version.Version
+	deleteVersion version.Version
+	fetchEntry    Entry
+	fetchFound    bool
 }
 
 func (h *captureHandler) NodeName() string {
@@ -63,25 +122,34 @@ func (h *captureHandler) NodeName() string {
 }
 
 func (h *captureHandler) Fetch(context.Context, string) (Entry, bool, error) {
-	return Entry{}, false, nil
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.fetchEntry, h.fetchFound, nil
 }
 
-func (h *captureHandler) Store(_ context.Context, _ string, _ []byte, _ time.Duration, version uint64, _ WriteConcern) error {
+func (h *captureHandler) Store(_ context.Context, _ string, _ []byte, _ time.Duration, version version.Version, _ WriteConcern) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.storeVersion = version
 	return nil
 }
 
-func (h *captureHandler) Delete(_ context.Context, _ string, version uint64, _ WriteConcern) error {
+func (h *captureHandler) Delete(_ context.Context, _ string, version version.Version, _ WriteConcern) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.deleteVersion = version
 	return nil
 }
 
-func (h *captureHandler) versions() (uint64, uint64) {
+func (h *captureHandler) versions() (version.Version, version.Version) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.storeVersion, h.deleteVersion
+}
+
+func assertVersionEqual(t *testing.T, got, want version.Version) {
+	t.Helper()
+	if got != want {
+		t.Fatalf("version=%s, want %s", got, want)
+	}
 }

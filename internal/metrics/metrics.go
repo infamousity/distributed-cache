@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -11,22 +12,33 @@ import (
 type Metrics struct {
 	registry *prometheus.Registry
 	server   *http.Server
+	ln       net.Listener
 
-	GetTotal             prometheus.Counter
-	HitTotal             prometheus.Counter
-	MissTotal            prometheus.Counter
-	ForwardTotal         prometheus.Counter
-	ForwardErrorTotal    prometheus.Counter
-	ReplicationSuccess   prometheus.Counter
-	ReplicationError     prometheus.Counter
-	ReplicationRetry     prometheus.Counter
-	ReplicationRetryDrop prometheus.Counter
-	ReadRepairTotal      prometheus.Counter
-	AntiEntropyTotal     prometheus.Counter
-	WriteQuorumFailed    prometheus.Counter
-	PeerAuthFail         prometheus.Counter
-	PeerTLSFail          prometheus.Counter
-	PeerUnreachable      prometheus.Counter
+	GetTotal              prometheus.Counter
+	HitTotal              prometheus.Counter
+	MissTotal             prometheus.Counter
+	ForwardTotal          prometheus.Counter
+	ForwardErrorTotal     prometheus.Counter
+	ReplicationSuccess    prometheus.Counter
+	ReplicationError      prometheus.Counter
+	ReplicationRetry      prometheus.Counter
+	ReplicationRetryDrop  prometheus.Counter
+	ReadRepairTotal       prometheus.Counter
+	AntiEntropyTotal      prometheus.Counter
+	WriteQuorumFailed     prometheus.Counter
+	PeerAuthFail          prometheus.Counter
+	PeerTLSFail           prometheus.Counter
+	PeerUnreachable       prometheus.Counter
+	ChurnCleanupDelayed   prometheus.Counter
+	ChurnCleanupApplied   prometheus.Counter
+	RingSize              prometheus.Gauge
+	VerifiedPeers         prometheus.Gauge
+	UnreachablePeers      prometheus.Gauge
+	IdentityMismatchPeers prometheus.Gauge
+	Ready                 prometheus.Gauge
+	RetryQueueDepth       prometheus.Gauge
+	GossipMessages        prometheus.Gauge
+	GossipDegradedEvents  prometheus.Gauge
 }
 
 func New(bindAddr string, bindPort int) (*Metrics, error) {
@@ -97,6 +109,46 @@ func New(bindAddr string, bindPort int) (*Metrics, error) {
 			Name: "cache_peer_unreachable_total",
 			Help: "Total peer unreachable failures",
 		}),
+		ChurnCleanupDelayed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "cache_churn_cleanup_delayed_total",
+			Help: "Total ownership-loss cleanup actions delayed by churn grace",
+		}),
+		ChurnCleanupApplied: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "cache_churn_cleanup_applied_total",
+			Help: "Total ownership-loss cleanup actions applied after churn grace",
+		}),
+		RingSize: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "cache_ring_size",
+			Help: "Current number of nodes in the local ring",
+		}),
+		VerifiedPeers: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "cache_verified_peers",
+			Help: "Current number of verified peers excluding self",
+		}),
+		UnreachablePeers: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "cache_unreachable_peers",
+			Help: "Current number of peers marked unreachable",
+		}),
+		IdentityMismatchPeers: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "cache_identity_mismatch_peers",
+			Help: "Current number of peers with control-plane identity mismatches",
+		}),
+		Ready: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "cache_ready",
+			Help: "Whether the cache node currently satisfies readiness checks",
+		}),
+		RetryQueueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "cache_retry_queue_depth",
+			Help: "Current number of pending replication retry tasks",
+		}),
+		GossipMessages: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "cache_gossip_log_messages",
+			Help: "Total memberlist log messages observed by this node",
+		}),
+		GossipDegradedEvents: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "cache_gossip_degraded_events",
+			Help: "Total memberlist log messages that indicate degraded gossip transport",
+		}),
 	}
 
 	reg.MustRegister(
@@ -115,6 +167,16 @@ func New(bindAddr string, bindPort int) (*Metrics, error) {
 		m.PeerAuthFail,
 		m.PeerTLSFail,
 		m.PeerUnreachable,
+		m.ChurnCleanupDelayed,
+		m.ChurnCleanupApplied,
+		m.RingSize,
+		m.VerifiedPeers,
+		m.UnreachablePeers,
+		m.IdentityMismatchPeers,
+		m.Ready,
+		m.RetryQueueDepth,
+		m.GossipMessages,
+		m.GossipDegradedEvents,
 	)
 
 	mux := http.NewServeMux()
@@ -130,8 +192,13 @@ func (m *Metrics) Start() error {
 	if m == nil || m.server == nil {
 		return nil
 	}
+	ln, err := net.Listen("tcp", m.server.Addr)
+	if err != nil {
+		return err
+	}
+	m.ln = ln
 	go func() {
-		_ = m.server.ListenAndServe()
+		_ = m.server.Serve(ln)
 	}()
 	return nil
 }

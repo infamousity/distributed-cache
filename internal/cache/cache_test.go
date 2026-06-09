@@ -1,10 +1,17 @@
 package cache
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/infamousity/distributed-cache/internal/version"
 )
+
+func v(n int64) version.Version {
+	return version.Version{Physical: n, NodeID: fmt.Sprintf("node-%03d", n)}
+}
 
 func TestStoreSetIsImmediatelyReadable(t *testing.T) {
 	store, err := NewStore(1 << 20)
@@ -63,13 +70,13 @@ func TestStoreTombstoneRejectsOlderWrite(t *testing.T) {
 	}
 	defer store.Close()
 
-	if ok := store.SetVersioned("k", []byte("old"), time.Minute, 10); !ok {
+	if ok := store.SetVersioned("k", []byte("old"), time.Minute, v(10)); !ok {
 		t.Fatalf("initial set returned false")
 	}
-	if ok := store.DeleteVersioned("k", 20, time.Minute); !ok {
+	if ok := store.DeleteVersioned("k", v(20), time.Minute); !ok {
 		t.Fatalf("delete returned false")
 	}
-	if ok := store.SetVersioned("k", []byte("stale"), time.Minute, 10); !ok {
+	if ok := store.SetVersioned("k", []byte("stale"), time.Minute, v(10)); !ok {
 		t.Fatalf("stale set returned false")
 	}
 
@@ -80,7 +87,7 @@ func TestStoreTombstoneRejectsOlderWrite(t *testing.T) {
 	if !found {
 		t.Fatalf("expected retained tombstone")
 	}
-	if !entry.Tombstone || entry.Version != 20 {
+	if !entry.Tombstone || entry.Version.Compare(v(20)) != 0 {
 		t.Fatalf("entry=%+v, want tombstone version 20", entry)
 	}
 }
@@ -92,10 +99,10 @@ func TestStoreNewerWriteReplacesTombstone(t *testing.T) {
 	}
 	defer store.Close()
 
-	if ok := store.DeleteVersioned("k", 20, time.Minute); !ok {
+	if ok := store.DeleteVersioned("k", v(20), time.Minute); !ok {
 		t.Fatalf("delete returned false")
 	}
-	if ok := store.SetVersioned("k", []byte("new"), time.Minute, 30); !ok {
+	if ok := store.SetVersioned("k", []byte("new"), time.Minute, v(30)); !ok {
 		t.Fatalf("newer set returned false")
 	}
 
@@ -108,6 +115,33 @@ func TestStoreNewerWriteReplacesTombstone(t *testing.T) {
 	}
 }
 
+func TestStoreUnversionedSetAdvancesBeyondObservedVersion(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	observed := version.Version{Physical: time.Now().Add(24 * time.Hour).UnixMilli(), NodeID: "future"}
+	if ok := store.DeleteVersioned("k", observed, time.Minute); !ok {
+		t.Fatalf("delete returned false")
+	}
+	if ok := store.Set("k", []byte("new"), time.Minute); !ok {
+		t.Fatalf("set returned false")
+	}
+
+	entry, found := store.GetEntry("k")
+	if !found {
+		t.Fatalf("expected value")
+	}
+	if entry.Tombstone || string(entry.Value) != "new" {
+		t.Fatalf("entry=%+v, want value new", entry)
+	}
+	if entry.Version.Compare(observed) <= 0 {
+		t.Fatalf("version %s did not advance beyond observed %s", entry.Version, observed)
+	}
+}
+
 func TestStoreConcurrentOlderWriteCannotBeatNewerTombstone(t *testing.T) {
 	store, err := NewStore(1 << 20)
 	if err != nil {
@@ -115,7 +149,7 @@ func TestStoreConcurrentOlderWriteCannotBeatNewerTombstone(t *testing.T) {
 	}
 	defer store.Close()
 
-	if ok := store.SetVersioned("k", []byte("old"), time.Minute, 10); !ok {
+	if ok := store.SetVersioned("k", []byte("old"), time.Minute, v(10)); !ok {
 		t.Fatalf("initial set returned false")
 	}
 
@@ -126,14 +160,14 @@ func TestStoreConcurrentOlderWriteCannotBeatNewerTombstone(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_ = store.SetVersioned("k", []byte("stale"), time.Minute, 10)
+			_ = store.SetVersioned("k", []byte("stale"), time.Minute, v(10))
 		}()
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		<-start
-		_ = store.DeleteVersioned("k", 20, time.Minute)
+		_ = store.DeleteVersioned("k", v(20), time.Minute)
 	}()
 	close(start)
 	wg.Wait()
@@ -142,7 +176,7 @@ func TestStoreConcurrentOlderWriteCannotBeatNewerTombstone(t *testing.T) {
 	if !found {
 		t.Fatalf("expected retained entry")
 	}
-	if !entry.Tombstone || entry.Version != 20 {
+	if !entry.Tombstone || entry.Version.Compare(v(20)) != 0 {
 		t.Fatalf("entry=%+v, want tombstone version 20", entry)
 	}
 }
@@ -154,19 +188,19 @@ func TestStoreTombstoneMetadataSurvivesPayloadEviction(t *testing.T) {
 	}
 	defer store.Close()
 
-	if ok := store.DeleteVersioned("k", 20, time.Minute); !ok {
+	if ok := store.DeleteVersioned("k", v(20), time.Minute); !ok {
 		t.Fatalf("delete returned false")
 	}
 	store.cache.Del("k")
 
-	if ok := store.SetVersioned("k", []byte("stale"), time.Minute, 10); !ok {
+	if ok := store.SetVersioned("k", []byte("stale"), time.Minute, v(10)); !ok {
 		t.Fatalf("stale set returned false")
 	}
 	entry, found := store.GetEntry("k")
 	if !found {
 		t.Fatalf("expected metadata tombstone")
 	}
-	if !entry.Tombstone || entry.Version != 20 {
+	if !entry.Tombstone || entry.Version.Compare(v(20)) != 0 {
 		t.Fatalf("entry=%+v, want tombstone version 20", entry)
 	}
 }
@@ -178,7 +212,7 @@ func TestStoreMetadataExpiresAfterRetention(t *testing.T) {
 	}
 	defer store.Close()
 
-	if ok := store.DeleteVersioned("k", 20, 10*time.Millisecond); !ok {
+	if ok := store.DeleteVersioned("k", v(20), 10*time.Millisecond); !ok {
 		t.Fatalf("delete returned false")
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -186,7 +220,7 @@ func TestStoreMetadataExpiresAfterRetention(t *testing.T) {
 		t.Fatalf("expected expired metadata, got %+v", entry)
 	}
 
-	if ok := store.SetVersioned("k", []byte("after-expiry"), time.Minute, 10); !ok {
+	if ok := store.SetVersioned("k", []byte("after-expiry"), time.Minute, v(10)); !ok {
 		t.Fatalf("set after expiry returned false")
 	}
 	value, found := store.Get("k")
@@ -204,15 +238,15 @@ func TestStoreGetEntryExpiresOnlyRequestedKey(t *testing.T) {
 
 	now := time.Now()
 	store.mu.Lock()
-	store.meta["expired-other"] = entryMeta{version: 1, expiresAt: now.Add(-time.Hour)}
-	store.meta["target"] = entryMeta{version: 2, tombstone: true, expiresAt: now.Add(time.Hour)}
+	store.meta["expired-other"] = entryMeta{version: v(1), expiresAt: now.Add(-time.Hour)}
+	store.meta["target"] = entryMeta{version: v(2), tombstone: true, expiresAt: now.Add(time.Hour)}
 	store.mu.Unlock()
 
 	entry, found := store.GetEntry("target")
 	if !found {
 		t.Fatalf("expected target tombstone")
 	}
-	if !entry.Tombstone || entry.Version != 2 {
+	if !entry.Tombstone || entry.Version.Compare(v(2)) != 0 {
 		t.Fatalf("entry=%+v, want tombstone version 2", entry)
 	}
 
@@ -231,11 +265,11 @@ func TestStorePutExpiresRequestedKeyBeforeCompare(t *testing.T) {
 	}
 	defer store.Close()
 
-	if ok := store.DeleteVersioned("k", 20, 10*time.Millisecond); !ok {
+	if ok := store.DeleteVersioned("k", v(20), 10*time.Millisecond); !ok {
 		t.Fatalf("delete returned false")
 	}
 	time.Sleep(20 * time.Millisecond)
-	if ok := store.SetVersioned("k", []byte("after-expiry"), time.Minute, 10); !ok {
+	if ok := store.SetVersioned("k", []byte("after-expiry"), time.Minute, v(10)); !ok {
 		t.Fatalf("set after requested-key expiry returned false")
 	}
 	value, found := store.Get("k")
@@ -253,10 +287,10 @@ func TestStoreMetadataCapCleansExpiredEntriesBoundedly(t *testing.T) {
 
 	store.mu.Lock()
 	store.maxMetaEntries = 1
-	store.meta["expired"] = entryMeta{version: 1, expiresAt: time.Now().Add(-time.Hour)}
+	store.meta["expired"] = entryMeta{version: v(1), expiresAt: time.Now().Add(-time.Hour)}
 	store.mu.Unlock()
 
-	if ok := store.SetVersioned("new", []byte("value"), time.Minute, 2); !ok {
+	if ok := store.SetVersioned("new", []byte("value"), time.Minute, v(2)); !ok {
 		t.Fatalf("set with expired metadata at cap returned false")
 	}
 	value, found := store.Get("new")

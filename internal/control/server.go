@@ -14,13 +14,14 @@ import (
 
 	"github.com/infamousity/distributed-cache/internal/controlpb"
 	"github.com/infamousity/distributed-cache/internal/log"
+	"github.com/infamousity/distributed-cache/internal/version"
 )
 
 type Handler interface {
 	NodeName() string
 	Fetch(ctx context.Context, key string) (Entry, bool, error)
-	Store(ctx context.Context, key string, value []byte, ttl time.Duration, version uint64, wc WriteConcern) error
-	Delete(ctx context.Context, key string, version uint64, wc WriteConcern) error
+	Store(ctx context.Context, key string, value []byte, ttl time.Duration, version version.Version, wc WriteConcern) error
+	Delete(ctx context.Context, key string, version version.Version, wc WriteConcern) error
 }
 
 type ServerOptions struct {
@@ -107,21 +108,21 @@ func (s *Server) Fetch(ctx context.Context, req *controlpb.FetchRequest) (*contr
 	return &controlpb.FetchResponse{
 		Found:     found,
 		Value:     entry.Value,
-		Version:   entry.Version,
+		Version:   toProtoVersion(entry.Version),
 		Tombstone: entry.Tombstone,
 	}, nil
 }
 
 func (s *Server) Store(ctx context.Context, req *controlpb.StoreRequest) (*controlpb.StoreResponse, error) {
 	ttl := time.Duration(req.GetTtlMs()) * time.Millisecond
-	if err := s.handler.Store(ctx, req.GetKey(), req.GetValue(), ttl, req.GetVersion(), fromProtoWriteConcern(req.GetWriteConcern())); err != nil {
+	if err := s.handler.Store(ctx, req.GetKey(), req.GetValue(), ttl, fromProtoVersion(req.GetVersion()), fromProtoWriteConcern(req.GetWriteConcern())); err != nil {
 		return nil, err
 	}
 	return &controlpb.StoreResponse{Ok: true}, nil
 }
 
 func (s *Server) Delete(ctx context.Context, req *controlpb.DeleteRequest) (*controlpb.DeleteResponse, error) {
-	if err := s.handler.Delete(ctx, req.GetKey(), req.GetVersion(), fromProtoWriteConcern(req.GetWriteConcern())); err != nil {
+	if err := s.handler.Delete(ctx, req.GetKey(), fromProtoVersion(req.GetVersion()), fromProtoWriteConcern(req.GetWriteConcern())); err != nil {
 		return nil, err
 	}
 	return &controlpb.DeleteResponse{Ok: true}, nil

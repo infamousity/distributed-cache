@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
+
+	"github.com/infamousity/distributed-cache/internal/version"
 )
 
 const (
@@ -18,16 +20,18 @@ type Store struct {
 	cache          *ristretto.Cache[string, Entry]
 	meta           map[string]entryMeta
 	maxMetaEntries int
+	lastVersion    version.Version
+	nodeID         string
 }
 
 type Entry struct {
 	Value     []byte
-	Version   uint64
+	Version   version.Version
 	Tombstone bool
 }
 
 type entryMeta struct {
-	version   uint64
+	version   version.Version
 	tombstone bool
 	expiresAt time.Time
 }
@@ -48,7 +52,16 @@ func NewStore(maxCost int64) (*Store, error) {
 		cache:          c,
 		meta:           make(map[string]entryMeta),
 		maxMetaEntries: defaultMaxMetadataEntries,
+		nodeID:         "local",
 	}, nil
+}
+
+func (s *Store) SetNodeID(nodeID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if nodeID != "" {
+		s.nodeID = nodeID
+	}
 }
 
 func (s *Store) Get(key string) ([]byte, bool) {
@@ -86,17 +99,17 @@ func (s *Store) GetEntry(key string) (Entry, bool) {
 }
 
 func (s *Store) Set(key string, value []byte, ttl time.Duration) bool {
-	return s.SetVersioned(key, value, ttl, uint64(time.Now().UnixNano()))
+	return s.SetVersioned(key, value, ttl, s.nextVersionLocked(time.Now()))
 }
 
-func (s *Store) SetVersioned(key string, value []byte, ttl time.Duration, version uint64) bool {
+func (s *Store) SetVersioned(key string, value []byte, ttl time.Duration, version version.Version) bool {
 	return s.put(key, Entry{
 		Value:   cloneBytes(value),
 		Version: version,
 	}, ttl)
 }
 
-func (s *Store) DeleteVersioned(key string, version uint64, tombstoneTTL time.Duration) bool {
+func (s *Store) DeleteVersioned(key string, version version.Version, tombstoneTTL time.Duration) bool {
 	return s.put(key, Entry{
 		Version:   version,
 		Tombstone: true,
@@ -135,6 +148,9 @@ func (s *Store) put(key string, entry Entry, ttl time.Duration) bool {
 	if ok {
 		s.cache.Wait()
 		s.meta[key] = nextMeta
+		if entry.Version.Compare(s.lastVersion) > 0 {
+			s.lastVersion = entry.Version
+		}
 		s.cleanupSomeExpiredLocked(now)
 	}
 	return ok
@@ -151,6 +167,14 @@ func (s *Store) Close() {
 	s.cache.Close()
 }
 
+func (s *Store) nextVersionLocked(now time.Time) version.Version {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.lastVersion.Next(now, s.nodeID)
+	s.lastVersion = next
+	return next
+}
+
 func cloneBytes(value []byte) []byte {
 	if value == nil {
 		return nil
@@ -161,20 +185,20 @@ func cloneBytes(value []byte) []byte {
 }
 
 func isOlder(next, current Entry) bool {
-	if next.Version < current.Version {
+	if next.Version.Compare(current.Version) < 0 {
 		return true
 	}
-	if next.Version > current.Version {
+	if next.Version.Compare(current.Version) > 0 {
 		return false
 	}
 	return current.Tombstone && !next.Tombstone
 }
 
 func metaIsOlder(next, current entryMeta) bool {
-	if next.version < current.version {
+	if next.version.Compare(current.version) < 0 {
 		return true
 	}
-	if next.version > current.version {
+	if next.version.Compare(current.version) > 0 {
 		return false
 	}
 	return current.tombstone && !next.tombstone

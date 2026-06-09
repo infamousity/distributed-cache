@@ -32,7 +32,7 @@ type ringMember struct {
 	ControlAddr string
 }
 
-// String() is used by consistent to identify a member; we return the HTTP Addr
+// String identifies the ring member by stable node name.
 func (m ringMember) String() string {
 	return m.Name
 }
@@ -69,7 +69,17 @@ func NewHashRing(selfName string, c *config.Config) Node {
 		Load:              1.25,
 		Hasher:            hasher{},
 	}
-	controlAddr := fmt.Sprintf("%s:%d", c.Common.Cache.Control.BindAddr, c.Common.Cache.Control.BindPort)
+	controlAddr := c.Common.Cache.Control.AdvertiseAddr
+	if controlAddr == "" {
+		controlHost := c.Common.Cache.Control.BindAddr
+		if controlHost == "" || controlHost == "0.0.0.0" {
+			controlHost = c.Common.Cache.Cluster.MemberList.AdvertiseAddr
+		}
+		if controlHost == "" {
+			controlHost = c.Common.Cache.Cluster.MemberList.BindAddr
+		}
+		controlAddr = fmt.Sprintf("%s:%d", controlHost, c.Common.Cache.Control.BindPort)
+	}
 	r := &ring{
 		hash: consistent.New([]consistent.Member{
 			ringMember{Name: selfName, ControlAddr: controlAddr},

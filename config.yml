@@ -3,9 +3,11 @@ common:
     log:
       level: info
     size_bytes: 1_073_741_824
+    shared_key: dev-shared-key
     api:
       bind_addr: "{{ ip }}"
       bind_port: 9090
+      advertise_addr: "{{ ip }}:9090"
     cluster:
       tls:
         enabled: false
@@ -15,4 +17,10 @@ common:
         bind_port: 8946
         advertise_addr: "{{ hostname }}"
         advertise_port: 8946
+        seed_dns_name: ""
+        seed_dns_port: 8946
         replication_factor: 3
+    seeds:
+      refresh_interval_ms: 30000
+    churn:
+      grace_period_ms: 30000

@@ -1,14 +1,19 @@
 package cache
 
 import (
+	"container/heap"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/infamousity/distributed-cache/internal/cache"
@@ -17,6 +22,7 @@ import (
 	"github.com/infamousity/distributed-cache/internal/control"
 	"github.com/infamousity/distributed-cache/internal/log"
 	"github.com/infamousity/distributed-cache/internal/metrics"
+	"github.com/infamousity/distributed-cache/internal/version"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -32,26 +38,107 @@ type DistributedCache struct {
 	clients   map[string]*control.Client
 	clientTLS *tls.Config
 
-	retryCh   chan retryTask
-	retryStop chan struct{}
-	retryWg   sync.WaitGroup
+	retryCh           chan retryTask
+	retryDelayCh      chan scheduledRetryTask
+	retryStop         chan struct{}
+	retryWg           sync.WaitGroup
+	retryDelayedDepth atomic.Int64
+
+	seedStop chan struct{}
+	seedWg   sync.WaitGroup
 
 	repairStop chan struct{}
 	repairWg   sync.WaitGroup
+
+	diagnosticsStop         chan struct{}
+	diagnosticsWg           sync.WaitGroup
+	diagnosticsLastDegraded uint64
 
 	keyMu sync.RWMutex
 	keys  map[string]keyMeta
 
 	versionMu   sync.Mutex
-	lastVersion uint64
+	lastVersion version.Version
 
 	metrics *metrics.Metrics
 
 	peerWarnMu   sync.Mutex
 	peerWarnLast map[string]time.Time
 
+	peerMu sync.RWMutex
+	peers  map[string]PeerStatus
+
+	churnMu       sync.Mutex
+	ownershipLost map[string]time.Time
+
 	closeOnce sync.Once
 	closeErr  error
+	closed    atomic.Bool
+}
+
+type PeerState string
+
+const (
+	PeerStateJoined           PeerState = "joined"
+	PeerStateVerified         PeerState = "verified"
+	PeerStateUnreachable      PeerState = "unreachable"
+	PeerStateIdentityMismatch PeerState = "identity_mismatch"
+	PeerStateLeft             PeerState = "left"
+)
+
+type PeerStatus struct {
+	Name        string
+	ControlAddr string
+	State       PeerState
+	LastSeen    time.Time
+	LastError   string
+}
+
+type Status struct {
+	NodeName      string
+	ControlReady  bool
+	Closed        bool
+	RingSize      int
+	VerifiedPeers int
+	MinReadyPeers int
+	Ready         bool
+	Gossip        GossipStatus
+	Peers         []PeerStatus
+}
+
+type GossipStatus struct {
+	MessageTotal     uint64
+	DegradedTotal    uint64
+	LastMessage      string
+	LastDegraded     string
+	LastDegradedTime time.Time
+}
+
+var ErrNotReady = errors.New("cache not ready")
+var ErrWriteIndeterminate = errors.New("cache write indeterminate")
+var ErrClosed = errors.New("cache closed")
+
+type WriteIndeterminateError struct {
+	Op  string
+	Key string
+	Err error
+}
+
+func (e *WriteIndeterminateError) Error() string {
+	if e == nil {
+		return ErrWriteIndeterminate.Error()
+	}
+	if e.Err == nil {
+		return fmt.Sprintf("%s %q: %s", e.Op, e.Key, ErrWriteIndeterminate)
+	}
+	return fmt.Sprintf("%s %q: %s: %v", e.Op, e.Key, ErrWriteIndeterminate, e.Err)
+}
+
+func (e *WriteIndeterminateError) Unwrap() []error {
+	if e == nil || e.Err == nil {
+		return []error{ErrWriteIndeterminate}
+	}
+	return []error{ErrWriteIndeterminate, e.Err}
 }
 
 func Start(opts Options) (*DistributedCache, error) {
@@ -73,6 +160,9 @@ func StartFromConfigFiles(paths ...string) (*DistributedCache, error) {
 }
 
 func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) ([]byte, bool, error) {
+	if d.isClosed() {
+		return nil, false, ErrClosed
+	}
 	call := d.resolveOptions(opts)
 	nsKey := d.namespacedKey(key, call)
 
@@ -122,6 +212,9 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 	defer cancel()
 	entry, found, err := client.Fetch(ctx, nsKey)
 	if err == nil {
+		if found {
+			d.observeVersion(entry.Version)
+		}
 		if found && entry.Tombstone {
 			d.recordMiss()
 			return nil, false, nil
@@ -147,6 +240,14 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 	var best control.Entry
 	var bestFound bool
 	self := d.cluster.GetNode().GetSelf()
+	if local, localFound := d.store.GetEntry(nsKey); localFound {
+		best = control.Entry{
+			Value:     local.Value,
+			Version:   local.Version,
+			Tombstone: local.Tombstone,
+		}
+		bestFound = true
+	}
 	for _, member := range members {
 		if member == self || member == owner {
 			continue
@@ -162,6 +263,9 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 		rctx, cancel := d.withTimeout(ctx)
 		entry, found, rerr = replicaClient.Fetch(rctx, nsKey)
 		cancel()
+		if rerr == nil && found {
+			d.observeVersion(entry.Version)
+		}
 		if rerr == nil && found && betterReplicaEntry(entry, best, bestFound) {
 			best = entry
 			bestFound = true
@@ -212,6 +316,9 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 }
 
 func (d *DistributedCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration, opts ...SetOption) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
 	call := d.resolveOptions(opts)
 	nsKey := d.namespacedKey(key, call)
 	wc := d.writeConcern(call)
@@ -236,12 +343,18 @@ func (d *DistributedCache) Set(ctx context.Context, key string, value []byte, tt
 			d.handlePeerError(addr, "set-forward", err)
 			return err
 		}
-		ctx, cancel := d.withTimeout(ctx)
+		ctx, cancel := d.withForwardTimeout(ctx)
 		defer cancel()
-		return client.StoreVersioned(ctx, nsKey, value, ttl, 0, toControlWriteConcern(wc))
+		if err := client.StoreVersioned(ctx, nsKey, value, ttl, version.Zero(), toControlWriteConcern(wc)); err != nil {
+			if control.IsWriteIndeterminate(err) {
+				return &WriteIndeterminateError{Op: "set", Key: key, Err: err}
+			}
+			return err
+		}
+		return nil
 	}
 
-	version := d.nextVersion()
+	version := d.nextVersionForKey(nsKey)
 	if err := d.storeLocalVersioned(nsKey, value, ttl, version); err != nil {
 		return err
 	}
@@ -250,7 +363,7 @@ func (d *DistributedCache) Set(ctx context.Context, key string, value []byte, tt
 			if d.metrics != nil {
 				d.metrics.WriteQuorumFailed.Inc()
 			}
-			return err
+			return &WriteIndeterminateError{Op: "set", Key: key, Err: err}
 		}
 		return nil
 	}
@@ -258,6 +371,9 @@ func (d *DistributedCache) Set(ctx context.Context, key string, value []byte, tt
 }
 
 func (d *DistributedCache) Del(ctx context.Context, key string, opts ...DelOption) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
 	call := d.resolveOptions(opts)
 	nsKey := d.namespacedKey(key, call)
 	wc := d.writeConcern(call)
@@ -282,12 +398,18 @@ func (d *DistributedCache) Del(ctx context.Context, key string, opts ...DelOptio
 			d.handlePeerError(addr, "del-forward", err)
 			return err
 		}
-		ctx, cancel := d.withTimeout(ctx)
+		ctx, cancel := d.withForwardTimeout(ctx)
 		defer cancel()
-		return client.DeleteVersioned(ctx, nsKey, 0, toControlWriteConcern(wc))
+		if err := client.DeleteVersioned(ctx, nsKey, version.Zero(), toControlWriteConcern(wc)); err != nil {
+			if control.IsWriteIndeterminate(err) {
+				return &WriteIndeterminateError{Op: "del", Key: key, Err: err}
+			}
+			return err
+		}
+		return nil
 	}
 
-	version := d.nextVersion()
+	version := d.nextVersionForKey(nsKey)
 	if err := d.deleteLocalVersioned(nsKey, version); err != nil {
 		return err
 	}
@@ -296,7 +418,7 @@ func (d *DistributedCache) Del(ctx context.Context, key string, opts ...DelOptio
 			if d.metrics != nil {
 				d.metrics.WriteQuorumFailed.Inc()
 			}
-			return err
+			return &WriteIndeterminateError{Op: "del", Key: key, Err: err}
 		}
 		return nil
 	}
@@ -305,7 +427,10 @@ func (d *DistributedCache) Del(ctx context.Context, key string, opts ...DelOptio
 
 func (d *DistributedCache) Close() error {
 	d.closeOnce.Do(func() {
+		d.closed.Store(true)
 		d.stopRepairWorker()
+		d.stopSeedWorker()
+		d.stopDiagnosticsWorker()
 		d.stopRetryWorker()
 		if d.control != nil {
 			d.control.Stop()
@@ -342,37 +467,51 @@ func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error
 	}
 
 	svc := &DistributedCache{
-		logger:       logger,
-		opts:         opts,
-		clients:      make(map[string]*control.Client),
-		clientTLS:    nil,
-		retryCh:      make(chan retryTask, opts.ReplicationRetryQueueSize),
-		retryStop:    make(chan struct{}),
-		repairStop:   make(chan struct{}),
-		keys:         make(map[string]keyMeta),
-		peerWarnLast: make(map[string]time.Time),
+		logger:          logger,
+		opts:            opts,
+		clients:         make(map[string]*control.Client),
+		clientTLS:       nil,
+		retryCh:         make(chan retryTask, opts.ReplicationRetryQueueSize),
+		retryDelayCh:    make(chan scheduledRetryTask, opts.ReplicationRetryQueueSize),
+		retryStop:       make(chan struct{}),
+		seedStop:        make(chan struct{}),
+		repairStop:      make(chan struct{}),
+		diagnosticsStop: make(chan struct{}),
+		keys:            make(map[string]keyMeta),
+		peerWarnLast:    make(map[string]time.Time),
+		peers:           make(map[string]PeerStatus),
+		ownershipLost:   make(map[string]time.Time),
 	}
+	started := false
+	defer func() {
+		if !started {
+			_ = svc.Close()
+		}
+	}()
 
 	store, err := cache.NewStore(int64(cfg.Common.Cache.SizeBytes))
 	if err != nil {
 		return nil, err
 	}
+	svc.store = store
 
 	cl, err := cluster.NewCluster(cfg)
 	if err != nil {
 		return nil, err
 	}
+	svc.cluster = cl
 
 	serverTLS, clientTLS, err := tlsConfigs(opts.TLS)
 	if err != nil {
 		return nil, err
 	}
 
-	svc.store = store
-	svc.cluster = cl
 	svc.clientTLS = clientTLS
+	cl.SetPeerEventHandler(svc)
 	svc.startRetryWorker()
+	svc.startSeedWorker()
 	svc.startRepairWorker()
+	svc.startDiagnosticsWorker()
 
 	m, err := metrics.New(cfg.Common.Cache.Metrics.BindAddr, cfg.Common.Cache.Metrics.BindPort)
 	if err != nil {
@@ -380,7 +519,12 @@ func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error
 	}
 	svc.metrics = m
 	if svc.metrics != nil {
-		_ = svc.metrics.Start()
+		if err := svc.metrics.Start(); err != nil {
+			_ = svc.Close()
+			return nil, fmt.Errorf("start metrics: %w", err)
+		}
+		svc.updatePeerMetrics()
+		svc.updateRetryQueueDepth()
 	}
 
 	controlServer, err := control.NewServer(svc, control.ServerOptions{
@@ -394,6 +538,8 @@ func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error
 	svc.control = controlServer
 	controlServer.Start()
 	logger.Infof("control plane listening on %s", controlServer.Addr())
+	svc.updatePeerMetrics()
+	svc.verifyKnownPeers()
 
 	if opts.SelfCheck || opts.FailFast {
 		if err := svc.selfCheckControl(); err != nil {
@@ -406,6 +552,7 @@ func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error
 	}
 
 	logger.Infof("cache node started: %s", cl.LocalNodeName())
+	started = true
 	return svc, nil
 }
 
@@ -413,8 +560,95 @@ func (d *DistributedCache) NodeName() string {
 	return d.cluster.LocalNodeName()
 }
 
+func (d *DistributedCache) Status() Status {
+	status := Status{
+		NodeName:      d.NodeName(),
+		Closed:        d.isClosed(),
+		ControlReady:  d.control != nil && !d.isClosed(),
+		MinReadyPeers: d.opts.MinReadyPeers,
+	}
+	if d.cluster != nil {
+		status.RingSize = len(d.cluster.GetNode().List())
+		gossip := d.cluster.GossipDiagnostics()
+		status.Gossip = GossipStatus{
+			MessageTotal:     gossip.MessageTotal,
+			DegradedTotal:    gossip.DegradedTotal,
+			LastMessage:      gossip.LastMessage,
+			LastDegraded:     gossip.LastDegraded,
+			LastDegradedTime: gossip.LastDegradedTime,
+		}
+	}
+	d.peerMu.RLock()
+	status.Peers = make([]PeerStatus, 0, len(d.peers))
+	for _, peer := range d.peers {
+		status.Peers = append(status.Peers, peer)
+		if peer.State == PeerStateVerified {
+			status.VerifiedPeers++
+		}
+	}
+	d.peerMu.RUnlock()
+	sort.Slice(status.Peers, func(i, j int) bool {
+		return status.Peers[i].Name < status.Peers[j].Name
+	})
+	status.Ready = !status.Closed && status.ControlReady && status.VerifiedPeers >= status.MinReadyPeers
+	return status
+}
+
+func (d *DistributedCache) Ready(ctx context.Context) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
+	status := d.Status()
+	if !status.ControlReady {
+		return fmt.Errorf("%w: control plane not initialized", ErrNotReady)
+	}
+	if status.VerifiedPeers < status.MinReadyPeers {
+		return fmt.Errorf("%w: verified peers %d below minimum %d", ErrNotReady, status.VerifiedPeers, status.MinReadyPeers)
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+	return nil
+}
+
+func (d *DistributedCache) WaitReady(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		err := d.Ready(ctx)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrNotReady) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (d *DistributedCache) isClosed() bool {
+	return d != nil && d.closed.Load()
+}
+
 func (d *DistributedCache) Fetch(_ context.Context, key string) (control.Entry, bool, error) {
+	if d.isClosed() {
+		return control.Entry{}, false, ErrClosed
+	}
 	entry, found := d.store.GetEntry(key)
+	if found {
+		d.observeVersion(entry.Version)
+	}
 	return control.Entry{
 		Value:     entry.Value,
 		Version:   entry.Version,
@@ -422,9 +656,14 @@ func (d *DistributedCache) Fetch(_ context.Context, key string) (control.Entry, 
 	}, found, nil
 }
 
-func (d *DistributedCache) Store(ctx context.Context, key string, value []byte, ttl time.Duration, version uint64, wc control.WriteConcern) error {
-	if version == 0 {
-		version = d.nextVersion()
+func (d *DistributedCache) Store(ctx context.Context, key string, value []byte, ttl time.Duration, version version.Version, wc control.WriteConcern) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
+	if version.IsZero() {
+		version = d.nextVersionForKey(key)
+	} else {
+		d.observeVersion(version)
 	}
 	if err := d.storeLocalVersioned(key, value, ttl, version); err != nil {
 		return err
@@ -433,15 +672,26 @@ func (d *DistributedCache) Store(ctx context.Context, key string, value []byte, 
 	case control.WriteConcernReplica:
 		return nil
 	case control.WriteConcernMajority:
-		return d.replicateWithQuorum(ctx, key, value, ttl, version)
+		if err := d.replicateWithQuorum(ctx, key, value, ttl, version); err != nil {
+			if d.metrics != nil {
+				d.metrics.WriteQuorumFailed.Inc()
+			}
+			return control.WriteIndeterminateError(err)
+		}
+		return nil
 	default:
 		return d.replicate(ctx, key, value, ttl, version)
 	}
 }
 
-func (d *DistributedCache) Delete(ctx context.Context, key string, version uint64, wc control.WriteConcern) error {
-	if version == 0 {
-		version = d.nextVersion()
+func (d *DistributedCache) Delete(ctx context.Context, key string, version version.Version, wc control.WriteConcern) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
+	if version.IsZero() {
+		version = d.nextVersionForKey(key)
+	} else {
+		d.observeVersion(version)
 	}
 	if err := d.deleteLocalVersioned(key, version); err != nil {
 		return err
@@ -450,37 +700,43 @@ func (d *DistributedCache) Delete(ctx context.Context, key string, version uint6
 	case control.WriteConcernReplica:
 		return nil
 	case control.WriteConcernMajority:
-		return d.replicateDeleteWithQuorum(ctx, key, version)
+		if err := d.replicateDeleteWithQuorum(ctx, key, version); err != nil {
+			if d.metrics != nil {
+				d.metrics.WriteQuorumFailed.Inc()
+			}
+			return control.WriteIndeterminateError(err)
+		}
+		return nil
 	default:
 		return d.replicateDelete(ctx, key, version)
 	}
 }
 
 func (d *DistributedCache) storeLocal(key string, value []byte, ttl time.Duration) error {
-	return d.storeLocalVersioned(key, value, ttl, d.nextVersion())
+	return d.storeLocalVersioned(key, value, ttl, d.nextVersionForKey(key))
 }
 
-func (d *DistributedCache) storeLocalVersioned(key string, value []byte, ttl time.Duration, version uint64) error {
+func (d *DistributedCache) storeLocalVersioned(key string, value []byte, ttl time.Duration, version version.Version) error {
 	if ok := d.store.SetVersioned(key, value, ttl, version); !ok {
 		return fmt.Errorf("failed to store value")
 	}
-	if entry, ok := d.store.GetEntry(key); ok && entry.Version == version && !entry.Tombstone {
+	if entry, ok := d.store.GetEntry(key); ok && entry.Version.Compare(version) == 0 && !entry.Tombstone {
 		d.addKey(key, ttl, version, false)
 	}
 	return nil
 }
 
-func (d *DistributedCache) deleteLocalVersioned(key string, version uint64) error {
+func (d *DistributedCache) deleteLocalVersioned(key string, version version.Version) error {
 	if ok := d.store.DeleteVersioned(key, version, d.opts.TombstoneTTL); !ok {
 		return fmt.Errorf("failed to store tombstone")
 	}
-	if entry, ok := d.store.GetEntry(key); ok && entry.Version == version && entry.Tombstone {
+	if entry, ok := d.store.GetEntry(key); ok && entry.Version.Compare(version) == 0 && entry.Tombstone {
 		d.addKey(key, d.opts.TombstoneTTL, version, true)
 	}
 	return nil
 }
 
-func (d *DistributedCache) replicate(ctx context.Context, key string, value []byte, ttl time.Duration, version uint64) error {
+func (d *DistributedCache) replicate(ctx context.Context, key string, value []byte, ttl time.Duration, version version.Version) error {
 	members, ok := d.cluster.GetNode().GetN(key, d.opts.ReplicationFactor)
 	if !ok || len(members) == 0 {
 		return nil
@@ -540,7 +796,7 @@ func (d *DistributedCache) replicate(ctx context.Context, key string, value []by
 	return nil
 }
 
-func (d *DistributedCache) replicateDelete(ctx context.Context, key string, version uint64) error {
+func (d *DistributedCache) replicateDelete(ctx context.Context, key string, version version.Version) error {
 	members, ok := d.cluster.GetNode().GetN(key, d.opts.ReplicationFactor)
 	if !ok || len(members) == 0 {
 		return nil
@@ -593,7 +849,7 @@ func (d *DistributedCache) replicateDelete(ctx context.Context, key string, vers
 	return nil
 }
 
-func (d *DistributedCache) replicateWithQuorum(ctx context.Context, key string, value []byte, ttl time.Duration, version uint64) error {
+func (d *DistributedCache) replicateWithQuorum(ctx context.Context, key string, value []byte, ttl time.Duration, version version.Version) error {
 	members, ok := d.cluster.GetNode().GetN(key, d.opts.ReplicationFactor)
 	if !ok || len(members) == 0 {
 		return nil
@@ -657,7 +913,7 @@ func (d *DistributedCache) replicateWithQuorum(ctx context.Context, key string, 
 	return fmt.Errorf("write quorum not reached: %d/%d", acks, quorum)
 }
 
-func (d *DistributedCache) replicateDeleteWithQuorum(ctx context.Context, key string, version uint64) error {
+func (d *DistributedCache) replicateDeleteWithQuorum(ctx context.Context, key string, version version.Version) error {
 	members, ok := d.cluster.GetNode().GetN(key, d.opts.ReplicationFactor)
 	if !ok || len(members) == 0 {
 		return nil
@@ -738,11 +994,151 @@ func (d *DistributedCache) clientFor(addr string) (*control.Client, error) {
 	return client, nil
 }
 
+func (d *DistributedCache) evictClient(addr string) {
+	if addr == "" {
+		return
+	}
+	d.clientMu.Lock()
+	client, ok := d.clients[addr]
+	if ok {
+		delete(d.clients, addr)
+	}
+	d.clientMu.Unlock()
+	if ok {
+		_ = client.Close()
+	}
+}
+
+func (d *DistributedCache) PeerJoined(name, controlAddr string) {
+	d.setPeerState(name, controlAddr, PeerStateJoined, "")
+	go d.verifyPeer(name, controlAddr)
+}
+
+func (d *DistributedCache) PeerLeft(name string, controlAddr string) {
+	d.setPeerState(name, controlAddr, PeerStateLeft, "")
+	d.evictClient(controlAddr)
+}
+
+func (d *DistributedCache) PeerUpdated(name, oldControlAddr, controlAddr string) {
+	d.setPeerState(name, controlAddr, PeerStateJoined, "")
+	if oldControlAddr != "" && oldControlAddr != controlAddr {
+		d.evictClient(oldControlAddr)
+	}
+	d.evictClient(controlAddr)
+	go d.verifyPeer(name, controlAddr)
+}
+
+func (d *DistributedCache) verifyKnownPeers() {
+	if d.cluster == nil {
+		return
+	}
+	self := d.cluster.GetNode().GetSelf()
+	for _, name := range d.cluster.GetNode().List() {
+		if name == self {
+			continue
+		}
+		addr, ok := d.cluster.GetNode().GetForwardAddr(name)
+		if !ok {
+			continue
+		}
+		go d.verifyPeer(name, addr)
+	}
+}
+
+func (d *DistributedCache) verifyPeer(name, addr string) {
+	if name == "" || addr == "" || name == d.cluster.GetNode().GetSelf() {
+		return
+	}
+	client, err := d.clientFor(addr)
+	if err != nil {
+		d.handlePeerError(addr, "peer-verify", err)
+		return
+	}
+	ctx, cancel := d.withTimeout(context.Background())
+	defer cancel()
+	got, err := client.Ping(ctx)
+	if err != nil {
+		d.setPeerState(name, addr, PeerStateUnreachable, err.Error())
+		d.handlePeerError(addr, "peer-verify", err)
+		return
+	}
+	if got != name {
+		d.evictClient(addr)
+		d.setPeerState(name, addr, PeerStateIdentityMismatch, fmt.Sprintf("ping returned %s", got))
+		d.logger.Warnf("peer identity mismatch for %s: ping returned %s from %s", name, got, addr)
+		return
+	}
+	d.setPeerState(name, addr, PeerStateVerified, "")
+}
+
+func (d *DistributedCache) setPeerState(name, addr string, state PeerState, lastErr string) {
+	if name == "" || name == d.cluster.GetNode().GetSelf() {
+		return
+	}
+	now := time.Now()
+	d.peerMu.Lock()
+	d.peers[name] = PeerStatus{
+		Name:        name,
+		ControlAddr: addr,
+		State:       state,
+		LastSeen:    now,
+		LastError:   lastErr,
+	}
+	d.peerMu.Unlock()
+	d.updatePeerMetrics()
+}
+
+func (d *DistributedCache) updatePeerMetrics() {
+	if d.metrics == nil {
+		return
+	}
+	d.updateMetricsFromStatus(d.Status())
+}
+
+func (d *DistributedCache) updateMetricsFromStatus(status Status) {
+	if d.metrics == nil {
+		return
+	}
+	d.metrics.RingSize.Set(float64(status.RingSize))
+	d.metrics.VerifiedPeers.Set(float64(status.VerifiedPeers))
+	if status.Ready {
+		d.metrics.Ready.Set(1)
+	} else {
+		d.metrics.Ready.Set(0)
+	}
+	var unreachable, identityMismatch int
+	for _, peer := range status.Peers {
+		switch peer.State {
+		case PeerStateUnreachable:
+			unreachable++
+		case PeerStateIdentityMismatch:
+			identityMismatch++
+		}
+	}
+	d.metrics.UnreachablePeers.Set(float64(unreachable))
+	d.metrics.IdentityMismatchPeers.Set(float64(identityMismatch))
+	d.metrics.GossipMessages.Set(float64(status.Gossip.MessageTotal))
+	d.metrics.GossipDegradedEvents.Set(float64(status.Gossip.DegradedTotal))
+}
+
 func (d *DistributedCache) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if d.opts.ControlTimeout <= 0 {
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, d.opts.ControlTimeout)
+}
+
+func (d *DistributedCache) withForwardTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok || d.opts.ControlTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, 3*d.opts.ControlTimeout)
 }
 
 func (d *DistributedCache) resolveOptions(opts []Option) CallOptions {
@@ -777,15 +1173,38 @@ func (d *DistributedCache) recordMiss() {
 	}
 }
 
-func (d *DistributedCache) nextVersion() uint64 {
-	now := uint64(time.Now().UnixNano())
+func (d *DistributedCache) nextVersion() version.Version {
+	now := time.Now()
 	d.versionMu.Lock()
 	defer d.versionMu.Unlock()
-	if now <= d.lastVersion {
-		now = d.lastVersion + 1
+	nodeID := ""
+	if d.cluster != nil {
+		nodeID = d.cluster.LocalNodeName()
 	}
-	d.lastVersion = now
-	return now
+	if nodeID == "" {
+		nodeID = d.opts.NodeName
+	}
+	next := d.lastVersion.Next(now, nodeID)
+	d.lastVersion = next
+	return next
+}
+
+func (d *DistributedCache) nextVersionForKey(key string) version.Version {
+	if entry, found := d.store.GetEntry(key); found {
+		d.observeVersion(entry.Version)
+	}
+	return d.nextVersion()
+}
+
+func (d *DistributedCache) observeVersion(version version.Version) {
+	if version.IsZero() {
+		return
+	}
+	d.versionMu.Lock()
+	if version.Compare(d.lastVersion) > 0 {
+		d.lastVersion = version
+	}
+	d.versionMu.Unlock()
 }
 
 func toControlWriteConcern(wc WriteConcern) control.WriteConcern {
@@ -835,6 +1254,9 @@ func (d *DistributedCache) handlePeerError(addr, op string, err error) {
 		case peerErrUnreachable:
 			d.metrics.PeerUnreachable.Inc()
 		}
+	}
+	if kind == peerErrUnreachable {
+		d.evictClient(addr)
 	}
 	d.peerWarnMu.Lock()
 	last := d.peerWarnLast[addr]
@@ -888,11 +1310,11 @@ func classifyPeerError(err error) peerErrKind {
 
 type keyMeta struct {
 	expiresAt time.Time
-	version   uint64
+	version   version.Version
 	tombstone bool
 }
 
-func (d *DistributedCache) addKey(key string, ttl time.Duration, version uint64, tombstone bool) {
+func (d *DistributedCache) addKey(key string, ttl time.Duration, version version.Version, tombstone bool) {
 	var exp time.Time
 	if ttl > 0 {
 		exp = time.Now().Add(ttl)
@@ -945,11 +1367,47 @@ type retryTask struct {
 	value     []byte
 	ttl       time.Duration
 	expiresAt time.Time
-	version   uint64
+	version   version.Version
 	attempts  int
 }
 
+type scheduledRetryTask struct {
+	task retryTask
+	at   time.Time
+}
+
+type retryTaskHeap []scheduledRetryTask
+
+func (h retryTaskHeap) Len() int {
+	return len(h)
+}
+
+func (h retryTaskHeap) Less(i, j int) bool {
+	return h[i].at.Before(h[j].at)
+}
+
+func (h retryTaskHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *retryTaskHeap) Push(x any) {
+	*h = append(*h, x.(scheduledRetryTask))
+}
+
+func (h *retryTaskHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
 func (d *DistributedCache) startRetryWorker() {
+	d.retryWg.Add(1)
+	go func() {
+		defer d.retryWg.Done()
+		d.runRetryScheduler()
+	}()
 	d.retryWg.Add(1)
 	go func() {
 		defer d.retryWg.Done()
@@ -967,6 +1425,73 @@ func (d *DistributedCache) startRetryWorker() {
 func (d *DistributedCache) stopRetryWorker() {
 	close(d.retryStop)
 	d.retryWg.Wait()
+}
+
+func (d *DistributedCache) runRetryScheduler() {
+	tasks := &retryTaskHeap{}
+	heap.Init(tasks)
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	var timerC <-chan time.Time
+	for {
+		if tasks.Len() > 0 && timerC == nil {
+			delay := time.Until((*tasks)[0].at)
+			if delay < 0 {
+				delay = 0
+			}
+			timer.Reset(delay)
+			timerC = timer.C
+		}
+		select {
+		case scheduled := <-d.retryDelayCh:
+			if tasks.Len() >= d.opts.ReplicationRetryQueueSize {
+				d.logger.Warnf("replication delayed retry queue full, dropping task for %s", scheduled.task.key)
+				if d.metrics != nil {
+					d.metrics.ReplicationRetryDrop.Inc()
+				}
+				d.retryDelayedDepth.Store(int64(tasks.Len()))
+				d.updateRetryQueueDepth()
+				continue
+			}
+			var oldNext time.Time
+			if tasks.Len() > 0 {
+				oldNext = (*tasks)[0].at
+			}
+			heap.Push(tasks, scheduled)
+			d.retryDelayedDepth.Store(int64(tasks.Len()))
+			d.updateRetryQueueDepth()
+			if timerC != nil && (oldNext.IsZero() || scheduled.at.Before(oldNext)) {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timerC = nil
+			}
+		case <-timerC:
+			timerC = nil
+			now := time.Now()
+			for tasks.Len() > 0 && !(*tasks)[0].at.After(now) {
+				scheduled := heap.Pop(tasks).(scheduledRetryTask)
+				d.retryDelayedDepth.Store(int64(tasks.Len()))
+				d.updateRetryQueueDepth()
+				d.enqueueRetry(scheduled.task)
+			}
+		case <-d.retryStop:
+			d.retryDelayedDepth.Store(0)
+			d.updateRetryQueueDepth()
+			if timerC != nil && !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		}
+	}
 }
 
 func (d *DistributedCache) startRepairWorker() {
@@ -994,6 +1519,108 @@ func (d *DistributedCache) stopRepairWorker() {
 	d.repairWg.Wait()
 }
 
+func (d *DistributedCache) startSeedWorker() {
+	if d.opts.SeedDNSName == "" && len(d.opts.SeedNodes) == 0 {
+		return
+	}
+	d.joinConfiguredSeeds()
+	if d.opts.SeedRefreshInterval <= 0 {
+		return
+	}
+	d.seedWg.Add(1)
+	go func() {
+		defer d.seedWg.Done()
+		ticker := time.NewTicker(d.opts.SeedRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				d.joinConfiguredSeeds()
+			case <-d.seedStop:
+				return
+			}
+		}
+	}()
+}
+
+func (d *DistributedCache) stopSeedWorker() {
+	close(d.seedStop)
+	d.seedWg.Wait()
+}
+
+func (d *DistributedCache) startDiagnosticsWorker() {
+	d.diagnosticsWg.Add(1)
+	go func() {
+		defer d.diagnosticsWg.Done()
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				status := d.Status()
+				d.updateMetricsFromStatus(status)
+				if status.Gossip.DegradedTotal > d.diagnosticsLastDegraded {
+					d.diagnosticsLastDegraded = status.Gossip.DegradedTotal
+					d.logger.Warnf("memberlist gossip transport degraded: total=%d last=%s", status.Gossip.DegradedTotal, status.Gossip.LastDegraded)
+				}
+			case <-d.diagnosticsStop:
+				return
+			}
+		}
+	}()
+}
+
+func (d *DistributedCache) stopDiagnosticsWorker() {
+	close(d.diagnosticsStop)
+	d.diagnosticsWg.Wait()
+}
+
+func (d *DistributedCache) joinConfiguredSeeds() {
+	if d.cluster == nil {
+		return
+	}
+	seeds := make([]string, 0, len(d.opts.SeedNodes)+4)
+	seeds = append(seeds, d.opts.SeedNodes...)
+	if d.opts.SeedDNSName != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), d.opts.ControlTimeout)
+		dnsSeeds, err := d.resolveDNSSeeds(ctx)
+		cancel()
+		if err != nil {
+			d.logger.Warnf("failed to resolve DNS seed %s: %v", d.opts.SeedDNSName, err)
+		} else {
+			seeds = append(seeds, dnsSeeds...)
+		}
+	}
+	if len(seeds) == 0 {
+		return
+	}
+	if _, err := d.cluster.JoinSeeds(seeds); err != nil {
+		d.logger.Warnf("failed to join refreshed seeds: %v", err)
+	}
+}
+
+func (d *DistributedCache) resolveDNSSeeds(ctx context.Context) ([]string, error) {
+	port := d.opts.SeedDNSPort
+	if port == 0 {
+		port = d.opts.GossipBindPort
+	}
+	if port == 0 {
+		return nil, fmt.Errorf("seed DNS port is required")
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, d.opts.SeedDNSName)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if ip.IP == nil {
+			continue
+		}
+		out = append(out, net.JoinHostPort(ip.IP.String(), strconv.Itoa(port)))
+	}
+	return out, nil
+}
+
 func (d *DistributedCache) runRepairCycle() {
 	keys := d.snapshotKeys(d.opts.RepairMaxKeysPerCycle)
 	if len(keys) == 0 {
@@ -1016,6 +1643,7 @@ func (d *DistributedCache) runRepairCycle() {
 			d.removeKey(key)
 			continue
 		}
+		d.observeVersion(entry.Version)
 		members, ok := d.cluster.GetNode().GetN(key, d.opts.ReplicationFactor)
 		if !ok || len(members) == 0 {
 			continue
@@ -1032,13 +1660,22 @@ func (d *DistributedCache) runRepairCycle() {
 			}
 		}
 		if !inOwners {
+			if d.shouldDelayOwnershipCleanup(key, now) {
+				if d.metrics != nil {
+					d.metrics.ChurnCleanupDelayed.Inc()
+				}
+				continue
+			}
 			d.store.Del(key)
 			d.removeKey(key)
+			d.clearOwnershipLost(key)
 			if d.metrics != nil {
 				d.metrics.AntiEntropyTotal.Inc()
+				d.metrics.ChurnCleanupApplied.Inc()
 			}
 			continue
 		}
+		d.clearOwnershipLost(key)
 
 		ttl := time.Duration(0)
 		if !meta.expiresAt.IsZero() {
@@ -1097,6 +1734,26 @@ func (d *DistributedCache) runRepairCycle() {
 	}
 }
 
+func (d *DistributedCache) shouldDelayOwnershipCleanup(key string, now time.Time) bool {
+	if d.opts.ChurnGracePeriod <= 0 {
+		return false
+	}
+	d.churnMu.Lock()
+	defer d.churnMu.Unlock()
+	lostAt, ok := d.ownershipLost[key]
+	if !ok {
+		d.ownershipLost[key] = now
+		return true
+	}
+	return now.Sub(lostAt) < d.opts.ChurnGracePeriod
+}
+
+func (d *DistributedCache) clearOwnershipLost(key string) {
+	d.churnMu.Lock()
+	delete(d.ownershipLost, key)
+	d.churnMu.Unlock()
+}
+
 func (d *DistributedCache) enqueueRetry(task retryTask) {
 	if d.opts.ReplicationRetryMaxAttempts <= 0 {
 		return
@@ -1107,7 +1764,7 @@ func (d *DistributedCache) enqueueRetry(task retryTask) {
 			task.expiresAt = expiresAtForTTL(task.ttl)
 		}
 	}
-	if task.version == 0 {
+	if task.version.IsZero() {
 		task.version = d.nextVersion()
 	}
 	select {
@@ -1115,6 +1772,7 @@ func (d *DistributedCache) enqueueRetry(task retryTask) {
 		if d.metrics != nil {
 			d.metrics.ReplicationRetry.Inc()
 		}
+		d.updateRetryQueueDepth()
 	case <-d.retryStop:
 		return
 	default:
@@ -1122,10 +1780,12 @@ func (d *DistributedCache) enqueueRetry(task retryTask) {
 		if d.metrics != nil {
 			d.metrics.ReplicationRetryDrop.Inc()
 		}
+		d.updateRetryQueueDepth()
 	}
 }
 
 func (d *DistributedCache) handleRetry(task retryTask) {
+	defer d.updateRetryQueueDepth()
 	if task.attempts > d.opts.ReplicationRetryMaxAttempts {
 		return
 	}
@@ -1154,6 +1814,13 @@ func (d *DistributedCache) handleRetry(task retryTask) {
 		d.handlePeerError(task.addr, "retry", err)
 		d.scheduleRetry(task)
 	}
+}
+
+func (d *DistributedCache) updateRetryQueueDepth() {
+	if d.metrics == nil || d.retryCh == nil {
+		return
+	}
+	d.metrics.RetryQueueDepth.Set(float64(len(d.retryCh) + len(d.retryDelayCh) + int(d.retryDelayedDepth.Load())))
 }
 
 func retryKindForEntry(entry cache.Entry) retryKind {
@@ -1196,15 +1863,22 @@ func (d *DistributedCache) scheduleRetry(task retryTask) {
 	}
 	next := task
 	next.attempts++
-	go func() {
-		timer := time.NewTimer(d.opts.ReplicationRetryInterval)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			d.enqueueRetry(next)
-		case <-d.retryStop:
+	scheduled := scheduledRetryTask{
+		task: next,
+		at:   time.Now().Add(d.opts.ReplicationRetryInterval),
+	}
+	select {
+	case d.retryDelayCh <- scheduled:
+		d.updateRetryQueueDepth()
+	case <-d.retryStop:
+		return
+	default:
+		d.logger.Warnf("replication delayed retry queue full, dropping task for %s", task.key)
+		if d.metrics != nil {
+			d.metrics.ReplicationRetryDrop.Inc()
 		}
-	}()
+		d.updateRetryQueueDepth()
+	}
 }
 
 func configFromOptions(opts Options) (*config.Config, error) {
@@ -1215,10 +1889,13 @@ func configFromOptions(opts Options) (*config.Config, error) {
 	cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = opts.AdvertiseAddr
 	cfg.Common.Cache.Cluster.MemberList.AdvertisePort = opts.AdvertisePort
 	cfg.Common.Cache.Cluster.MemberList.SeedNodes = opts.SeedNodes
+	cfg.Common.Cache.Cluster.MemberList.SeedDNSName = opts.SeedDNSName
+	cfg.Common.Cache.Cluster.MemberList.SeedDNSPort = opts.SeedDNSPort
 	cfg.Common.Cache.Cluster.MemberList.PartitionCount = opts.PartitionCount
 	cfg.Common.Cache.Cluster.MemberList.ReplicationFactor = opts.ReplicationFactor
 	cfg.Common.Cache.Control.BindAddr = opts.ControlBindAddr
 	cfg.Common.Cache.Control.BindPort = opts.ControlBindPort
+	cfg.Common.Cache.Control.AdvertiseAddr = opts.ControlAdvertiseAddr
 	cfg.Common.Cache.SizeBytes = int(opts.CacheSizeBytes)
 	cfg.Common.Cache.SharedKey = opts.SharedKey
 	cfg.Common.Cache.Namespace = opts.Namespace
@@ -1228,6 +1905,8 @@ func configFromOptions(opts Options) (*config.Config, error) {
 	cfg.Common.Cache.Retry.QueueSize = opts.ReplicationRetryQueueSize
 	cfg.Common.Cache.Repair.IntervalMs = int(opts.RepairInterval / time.Millisecond)
 	cfg.Common.Cache.Repair.MaxKeysPerCycle = opts.RepairMaxKeysPerCycle
+	cfg.Common.Cache.Churn.GracePeriodMs = int(opts.ChurnGracePeriod / time.Millisecond)
+	cfg.Common.Cache.Seeds.RefreshIntervalMs = int(opts.SeedRefreshInterval / time.Millisecond)
 	cfg.Common.Cache.TombstoneTTL = int(opts.TombstoneTTL / time.Millisecond)
 	cfg.Common.Cache.Metrics.BindAddr = opts.MetricsBindAddr
 	cfg.Common.Cache.Metrics.BindPort = opts.MetricsBindPort
@@ -1235,12 +1914,17 @@ func configFromOptions(opts Options) (*config.Config, error) {
 	cfg.Common.Cache.Diagnostics.SelfCheck = opts.SelfCheck
 	cfg.Common.Cache.Diagnostics.SelfCheckTimeout = int(opts.SelfCheckTimeout / time.Millisecond)
 	cfg.Common.Cache.Diagnostics.RequireSharedKey = opts.RequireSharedKey
+	cfg.Common.Cache.Diagnostics.AllowInsecure = opts.AllowInsecure
 	cfg.Common.Cache.Diagnostics.PeerWarnInterval = int(opts.PeerWarnInterval / time.Millisecond)
+	cfg.Common.Cache.Diagnostics.MinReadyPeers = opts.MinReadyPeers
 	cfg.Common.Cache.Cluster.Tls.Enabled = opts.TLS.Enabled
 	cfg.Common.Cache.Cluster.Tls.CertFile = opts.TLS.CertFile
 	cfg.Common.Cache.Cluster.Tls.KeyFile = opts.TLS.KeyFile
 	cfg.Common.Cache.Cluster.Tls.CaFile = opts.TLS.CAFile
 	cfg.Common.Cache.Cluster.Tls.ServerName = opts.TLS.ServerName
+	cfg.Common.Cache.Cluster.Tls.ClientCertFile = opts.TLS.ClientCertFile
+	cfg.Common.Cache.Cluster.Tls.ClientKeyFile = opts.TLS.ClientKeyFile
+	cfg.Common.Cache.Cluster.Tls.RequireClientCert = opts.TLS.RequireClientCert
 
 	if cfg.Common.Cache.Control.BindAddr == "" || cfg.Common.Cache.Control.BindPort == 0 {
 		return nil, fmt.Errorf("control bind address and port are required")
@@ -1259,11 +1943,14 @@ func optionsFromConfig(cfg *config.Config) Options {
 		NodeName:                    cfg.Common.Cache.Cluster.MemberList.NodeName,
 		ControlBindAddr:             cfg.Common.Cache.Control.BindAddr,
 		ControlBindPort:             cfg.Common.Cache.Control.BindPort,
+		ControlAdvertiseAddr:        cfg.Common.Cache.Control.AdvertiseAddr,
 		GossipBindAddr:              cfg.Common.Cache.Cluster.MemberList.BindAddr,
 		GossipBindPort:              cfg.Common.Cache.Cluster.MemberList.BindPort,
 		AdvertiseAddr:               cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr,
 		AdvertisePort:               cfg.Common.Cache.Cluster.MemberList.AdvertisePort,
 		SeedNodes:                   cfg.Common.Cache.Cluster.MemberList.SeedNodes,
+		SeedDNSName:                 cfg.Common.Cache.Cluster.MemberList.SeedDNSName,
+		SeedDNSPort:                 cfg.Common.Cache.Cluster.MemberList.SeedDNSPort,
 		SharedKey:                   cfg.Common.Cache.SharedKey,
 		Namespace:                   cfg.Common.Cache.Namespace,
 		WriteConcern:                parseWriteConcern(cfg.Common.Cache.WriteConcern),
@@ -1275,6 +1962,8 @@ func optionsFromConfig(cfg *config.Config) Options {
 		ReplicationRetryQueueSize:   cfg.Common.Cache.Retry.QueueSize,
 		RepairInterval:              time.Duration(cfg.Common.Cache.Repair.IntervalMs) * time.Millisecond,
 		RepairMaxKeysPerCycle:       cfg.Common.Cache.Repair.MaxKeysPerCycle,
+		ChurnGracePeriod:            time.Duration(cfg.Common.Cache.Churn.GracePeriodMs) * time.Millisecond,
+		SeedRefreshInterval:         time.Duration(cfg.Common.Cache.Seeds.RefreshIntervalMs) * time.Millisecond,
 		TombstoneTTL:                time.Duration(cfg.Common.Cache.TombstoneTTL) * time.Millisecond,
 		MetricsBindAddr:             cfg.Common.Cache.Metrics.BindAddr,
 		MetricsBindPort:             cfg.Common.Cache.Metrics.BindPort,
@@ -1282,7 +1971,9 @@ func optionsFromConfig(cfg *config.Config) Options {
 		SelfCheck:                   cfg.Common.Cache.Diagnostics.SelfCheck,
 		SelfCheckTimeout:            time.Duration(cfg.Common.Cache.Diagnostics.SelfCheckTimeout) * time.Millisecond,
 		RequireSharedKey:            cfg.Common.Cache.Diagnostics.RequireSharedKey,
+		AllowInsecure:               cfg.Common.Cache.Diagnostics.AllowInsecure,
 		PeerWarnInterval:            time.Duration(cfg.Common.Cache.Diagnostics.PeerWarnInterval) * time.Millisecond,
+		MinReadyPeers:               cfg.Common.Cache.Diagnostics.MinReadyPeers,
 		TLS: TLSOptions{
 			Enabled:           cfg.Common.Cache.Cluster.Tls.Enabled,
 			CertFile:          cfg.Common.Cache.Cluster.Tls.CertFile,
@@ -1300,14 +1991,63 @@ func validateConfig(cfg *config.Config, opts Options) error {
 	if opts.TombstoneTTL < 0 {
 		return fmt.Errorf("tombstone_ttl must be >= 0")
 	}
+	if opts.ChurnGracePeriod < 0 {
+		return fmt.Errorf("churn_grace_period must be >= 0")
+	}
+	if opts.ControlTimeout < 0 {
+		return fmt.Errorf("control_timeout must be >= 0")
+	}
+	if opts.ReplicationRetryInterval < 0 {
+		return fmt.Errorf("replication_retry_interval must be >= 0")
+	}
+	if opts.ReplicationRetryQueueSize < 0 {
+		return fmt.Errorf("replication_retry_queue_size must be >= 0")
+	}
+	if opts.SeedRefreshInterval < 0 {
+		return fmt.Errorf("seed_refresh_interval must be >= 0")
+	}
+	if opts.SelfCheckTimeout < 0 {
+		return fmt.Errorf("self_check_timeout must be >= 0")
+	}
+	if opts.PeerWarnInterval < 0 {
+		return fmt.Errorf("peer_warn_interval must be >= 0")
+	}
+	if opts.MinReadyPeers < 0 {
+		return fmt.Errorf("min_ready_peers must be >= 0")
+	}
+	if cfg.Common.Cache.Cluster.MemberList.SeedDNSName != "" && cfg.Common.Cache.Cluster.MemberList.SeedDNSPort < 0 {
+		return fmt.Errorf("seed_dns_port must be >= 0")
+	}
+	if cfg.Common.Cache.SharedKey == "" && !opts.AllowInsecure {
+		return fmt.Errorf("shared_key is required unless diagnostics.allow_insecure is enabled")
+	}
 	if opts.RequireSharedKey && cfg.Common.Cache.SharedKey == "" {
 		return fmt.Errorf("diagnostics.require_shared_key enabled but shared_key is empty")
 	}
+	if cfg.Common.Cache.Control.AdvertiseAddr != "" {
+		if err := validateControlAdvertiseAddr(cfg.Common.Cache.Control.AdvertiseAddr); err != nil {
+			return err
+		}
+	}
 	if opts.FailFast {
 		controlBind := cfg.Common.Cache.Control.BindAddr
-		if (controlBind == "" || controlBind == "0.0.0.0") && cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr == "" {
-			return fmt.Errorf("control bind address is %q without advertise address; set advertise_address or explicit control bind addr", controlBind)
+		if (controlBind == "" || controlBind == "0.0.0.0") && cfg.Common.Cache.Control.AdvertiseAddr == "" && cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr == "" {
+			return fmt.Errorf("control bind address is %q without advertise address; set api.advertise_addr, memberlist advertise_address, or explicit control bind addr", controlBind)
 		}
+	}
+	return nil
+}
+
+func validateControlAdvertiseAddr(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid control advertise addr %q: %w", addr, err)
+	}
+	if host == "" || port == "" {
+		return fmt.Errorf("invalid control advertise addr %q: host and port are required", addr)
+	}
+	if host == "0.0.0.0" || host == "::" {
+		return fmt.Errorf("invalid control advertise addr %q: must be peer-reachable, not a wildcard bind address", addr)
 	}
 	return nil
 }
@@ -1316,8 +2056,8 @@ func betterReplicaEntry(candidate, best control.Entry, bestFound bool) bool {
 	if !bestFound {
 		return true
 	}
-	if candidate.Version != best.Version {
-		return candidate.Version > best.Version
+	if candidate.Version.Compare(best.Version) != 0 {
+		return candidate.Version.Compare(best.Version) > 0
 	}
 	return candidate.Tombstone && !best.Tombstone
 }

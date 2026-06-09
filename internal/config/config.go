@@ -63,13 +63,16 @@ type Config struct {
 					AdvertiseAddr     string   `mapstructure:"advertise_address"`       // optional; falls back to BindAddr
 					AdvertisePort     int      `mapstructure:"advertise_port"`          // usually same as BindPort
 					SeedNodes         []string `mapstructure:"seed_nodes"`              // gossip seed nodes: ["10.10.1.3:8946", ...]
+					SeedDNSName       string   `mapstructure:"seed_dns_name"`           // optional DNS name resolved into seed nodes
+					SeedDNSPort       int      `mapstructure:"seed_dns_port"`           // port used with seed_dns_name
 					PartitionCount    int      `mapstructure:"partition_count"`         // max partitions in this memberlist (default: 271)
 					ReplicationFactor int      `mapstructure:"replication_factor"`      // number of replicas (default: 3)
 				} `mapstructure:"memberlist"`
 			} `mapstructure:"cluster"`
 			Control struct {
-				BindAddr string `mapstructure:"bind_addr"`
-				BindPort int    `mapstructure:"bind_port"`
+				BindAddr      string `mapstructure:"bind_addr"`
+				BindPort      int    `mapstructure:"bind_port"`
+				AdvertiseAddr string `mapstructure:"advertise_addr"`
 			} `mapstructure:"api"`
 			Log struct {
 				Level string `mapstructure:"level"`
@@ -88,6 +91,12 @@ type Config struct {
 				IntervalMs      int `mapstructure:"interval_ms"`
 				MaxKeysPerCycle int `mapstructure:"max_keys_per_cycle"`
 			} `mapstructure:"repair"`
+			Churn struct {
+				GracePeriodMs int `mapstructure:"grace_period_ms"`
+			} `mapstructure:"churn"`
+			Seeds struct {
+				RefreshIntervalMs int `mapstructure:"refresh_interval_ms"`
+			} `mapstructure:"seeds"`
 			Metrics struct {
 				BindAddr string `mapstructure:"bind_addr"`
 				BindPort int    `mapstructure:"bind_port"`
@@ -97,7 +106,9 @@ type Config struct {
 				SelfCheck        bool `mapstructure:"self_check"`
 				SelfCheckTimeout int  `mapstructure:"self_check_timeout_ms"`
 				RequireSharedKey bool `mapstructure:"require_shared_key"`
+				AllowInsecure    bool `mapstructure:"allow_insecure"`
 				PeerWarnInterval int  `mapstructure:"peer_warn_interval_ms"`
+				MinReadyPeers    int  `mapstructure:"min_ready_peers"`
 			} `mapstructure:"diagnostics"`
 		} `mapstructure:"cache"`
 	} `mapstructure:"common"`
@@ -119,7 +130,25 @@ func internalBinds(v *viper.Viper) error {
 	if err := v.BindEnv("common.cache.cluster.memberlist.bind_port", "CACHE_CLUSTER_MEMBERLIST_BIND_PORT"); err != nil {
 		return err
 	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.advertise_address", "CACHE_CLUSTER_MEMBERLIST_ADVERTISE_ADDRESS", "CACHE_GOSSIP_ADVERTISE_ADDR", "CACHE_ADVERTISE_ADDR"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.advertise_port", "CACHE_CLUSTER_MEMBERLIST_ADVERTISE_PORT", "CACHE_GOSSIP_ADVERTISE_PORT"); err != nil {
+		return err
+	}
 	if err := v.BindEnv("common.cache.cluster.memberlist.seed_nodes", "CACHE_CLUSTER_MEMBERLIST_SEED_NODES"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.seed_dns_name", "CACHE_CLUSTER_MEMBERLIST_SEED_DNS_NAME"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.seed_dns_port", "CACHE_CLUSTER_MEMBERLIST_SEED_DNS_PORT"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.partition_count", "CACHE_CLUSTER_MEMBERLIST_PARTITION_COUNT", "CACHE_PARTITION_COUNT"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.replication_factor", "CACHE_CLUSTER_MEMBERLIST_REPLICATION_FACTOR", "CACHE_REPLICATION_FACTOR"); err != nil {
 		return err
 	}
 	if err := v.BindEnv("common.cache.api.bind_addr", "CACHE_API_BIND_ADDR"); err != nil {
@@ -128,10 +157,16 @@ func internalBinds(v *viper.Viper) error {
 	if err := v.BindEnv("common.cache.api.bind_port", "CACHE_API_BIND_PORT"); err != nil {
 		return err
 	}
+	if err := v.BindEnv("common.cache.api.advertise_addr", "CACHE_API_ADVERTISE_ADDR", "CACHE_CONTROL_ADVERTISE_ADDR"); err != nil {
+		return err
+	}
 	if err := v.BindEnv("common.cache.log.level", "CACHE_LOG_LEVEL"); err != nil {
 		return err
 	}
 	if err := v.BindEnv("common.cache.size_bytes", "CACHE_SIZE_BYTES"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.shared_key", "CACHE_SHARED_KEY"); err != nil {
 		return err
 	}
 	if err := v.BindEnv("common.cache.namespace", "CACHE_NAMESPACE"); err != nil {
@@ -158,6 +193,12 @@ func internalBinds(v *viper.Viper) error {
 	if err := v.BindEnv("common.cache.repair.max_keys_per_cycle", "CACHE_REPAIR_MAX_KEYS_PER_CYCLE"); err != nil {
 		return err
 	}
+	if err := v.BindEnv("common.cache.churn.grace_period_ms", "CACHE_CHURN_GRACE_PERIOD_MS"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.seeds.refresh_interval_ms", "CACHE_SEEDS_REFRESH_INTERVAL_MS"); err != nil {
+		return err
+	}
 	if err := v.BindEnv("common.cache.metrics.bind_addr", "CACHE_METRICS_BIND_ADDR"); err != nil {
 		return err
 	}
@@ -176,10 +217,28 @@ func internalBinds(v *viper.Viper) error {
 	if err := v.BindEnv("common.cache.diagnostics.require_shared_key", "CACHE_DIAGNOSTICS_REQUIRE_SHARED_KEY"); err != nil {
 		return err
 	}
+	if err := v.BindEnv("common.cache.diagnostics.allow_insecure", "CACHE_DIAGNOSTICS_ALLOW_INSECURE", "CACHE_ALLOW_INSECURE"); err != nil {
+		return err
+	}
 	if err := v.BindEnv("common.cache.diagnostics.peer_warn_interval_ms", "CACHE_DIAGNOSTICS_PEER_WARN_INTERVAL_MS"); err != nil {
 		return err
 	}
-	if err := v.BindEnv("common.cache.cluster.memberlist.replication_factor", "CACHE_CLUSTER_MEMBERLIST_REPLICATION_FACTOR"); err != nil {
+	if err := v.BindEnv("common.cache.diagnostics.min_ready_peers", "CACHE_DIAGNOSTICS_MIN_READY_PEERS"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.tls.enabled", "CACHE_CLUSTER_TLS_ENABLED"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.tls.cert_file", "CACHE_CLUSTER_TLS_CERT_FILE"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.tls.key_file", "CACHE_CLUSTER_TLS_KEY_FILE"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.tls.ca_file", "CACHE_CLUSTER_TLS_CA_FILE"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.tls.server_name", "CACHE_CLUSTER_TLS_SERVER_NAME"); err != nil {
 		return err
 	}
 	if err := v.BindEnv("common.cache.cluster.tls.require_client_cert", "CACHE_CLUSTER_TLS_REQUIRE_CLIENT_CERT"); err != nil {
@@ -216,9 +275,11 @@ func Load(paths ...string) (*Config, error) {
 			}
 		}
 	}
-	if err := godotenv.Overload(envFiles...); err != nil {
-		l.With("error", err).Errorf("failed to load .env files: %s", strings.Join(envFiles, ", "))
-		panic(err)
+	if len(envFiles) > 0 {
+		if err := godotenv.Overload(envFiles...); err != nil {
+			l.With("error", err).Errorf("failed to load .env files: %s", strings.Join(envFiles, ", "))
+			panic(err)
+		}
 	}
 
 	base := viper.New()
@@ -235,6 +296,8 @@ func Load(paths ...string) (*Config, error) {
 	base.SetDefault("common.cache.retry.queue_size", 1024)
 	base.SetDefault("common.cache.repair.interval_ms", 30000)
 	base.SetDefault("common.cache.repair.max_keys_per_cycle", 1000)
+	base.SetDefault("common.cache.churn.grace_period_ms", 30000)
+	base.SetDefault("common.cache.seeds.refresh_interval_ms", 30000)
 	base.SetDefault("common.cache.write_concern", "one")
 	base.SetDefault("common.cache.tombstone_ttl_ms", 300000)
 	base.SetDefault("common.cache.diagnostics.self_check_timeout_ms", 1000)

@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -20,7 +21,13 @@ import (
 	internalcache "github.com/infamousity/distributed-cache/internal/cache"
 	"github.com/infamousity/distributed-cache/internal/config"
 	"github.com/infamousity/distributed-cache/internal/control"
+	internallog "github.com/infamousity/distributed-cache/internal/log"
+	"github.com/infamousity/distributed-cache/internal/version"
 )
+
+func testVersion(physical int64, nodeID string) version.Version {
+	return version.Version{Physical: physical, NodeID: nodeID}
+}
 
 func getFreePort(t *testing.T) int {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -96,17 +103,316 @@ func TestValidateConfigRejectsNegativeTombstoneTTL(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsNegativeOperationalOptions(t *testing.T) {
+	cases := []struct {
+		name string
+		opts Options
+	}{
+		{name: "control timeout", opts: Options{ControlTimeout: -time.Second}},
+		{name: "retry interval", opts: Options{ReplicationRetryInterval: -time.Second}},
+		{name: "retry queue size", opts: Options{ReplicationRetryQueueSize: -1}},
+		{name: "self check timeout", opts: Options{SelfCheckTimeout: -time.Second}},
+		{name: "peer warn interval", opts: Options{PeerWarnInterval: -time.Second}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateConfig(&config.Config{}, tc.opts); err == nil {
+				t.Fatalf("expected validation error")
+			}
+		})
+	}
+}
+
+func TestValidateConfigRejectsInvalidControlAdvertiseAddr(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Common.Cache.Control.AdvertiseAddr = "127.0.0.1"
+	if err := validateConfig(cfg, Options{}); err == nil {
+		t.Fatalf("expected control advertise addr without port to be rejected")
+	}
+
+	cfg.Common.Cache.Control.AdvertiseAddr = "0.0.0.0:9090"
+	if err := validateConfig(cfg, Options{}); err == nil {
+		t.Fatalf("expected wildcard control advertise addr to be rejected")
+	}
+}
+
+func TestControlAdvertiseAddrSetsSelfForwardAddress(t *testing.T) {
+	controlPort := getFreePort(t)
+	controlAddr := fmt.Sprintf("127.0.0.1:%d", controlPort)
+	c, err := Start(Options{
+		NodeName:             "node-advertise",
+		ControlBindAddr:      "127.0.0.1",
+		ControlBindPort:      controlPort,
+		ControlAdvertiseAddr: controlAddr,
+		GossipBindAddr:       "127.0.0.1",
+		GossipBindPort:       getFreePort(t),
+		SharedKey:            "test-key",
+		ReplicationFactor:    2,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	got, ok := c.cluster.GetNode().GetForwardAddr(c.cluster.GetNode().GetSelf())
+	if !ok {
+		t.Fatalf("self forward address missing")
+	}
+	if got != controlAddr {
+		t.Fatalf("self forward address = %q, want %q", got, controlAddr)
+	}
+}
+
 func TestReplicaSelectionPrefersTombstoneOnEqualVersion(t *testing.T) {
-	best := control.Entry{Value: []byte("value"), Version: 10}
-	tombstone := control.Entry{Version: 10, Tombstone: true}
+	best := control.Entry{Value: []byte("value"), Version: testVersion(10, "a")}
+	tombstone := control.Entry{Version: testVersion(10, "a"), Tombstone: true}
 	if !betterReplicaEntry(tombstone, best, true) {
 		t.Fatalf("expected equal-version tombstone to beat value")
 	}
 	if betterReplicaEntry(best, tombstone, true) {
 		t.Fatalf("expected equal-version value not to beat tombstone")
 	}
-	if !betterReplicaEntry(control.Entry{Value: []byte("newer"), Version: 11}, tombstone, true) {
+	if !betterReplicaEntry(control.Entry{Value: []byte("newer"), Version: testVersion(11, "a")}, tombstone, true) {
 		t.Fatalf("expected newer value to beat older tombstone")
+	}
+}
+
+func TestVerifyPeerEvictsClientOnIdentityMismatch(t *testing.T) {
+	controlPort := getFreePort(t)
+	controlAddr := fmt.Sprintf("127.0.0.1:%d", controlPort)
+	c, err := Start(Options{
+		NodeName:             "node-actual",
+		ControlBindAddr:      "127.0.0.1",
+		ControlBindPort:      controlPort,
+		ControlAdvertiseAddr: controlAddr,
+		GossipBindAddr:       "127.0.0.1",
+		GossipBindPort:       getFreePort(t),
+		SharedKey:            "test-key",
+		ReplicationFactor:    2,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	client, err := c.clientFor(controlAddr)
+	if err != nil {
+		t.Fatalf("clientFor: %v", err)
+	}
+	if client == nil {
+		t.Fatalf("clientFor returned nil client")
+	}
+
+	c.verifyPeer("node-expected", controlAddr)
+	c.clientMu.Lock()
+	_, ok := c.clients[controlAddr]
+	c.clientMu.Unlock()
+	if ok {
+		t.Fatalf("expected identity mismatch to evict cached client")
+	}
+}
+
+func TestReadyRequiresMinimumVerifiedPeers(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "node-ready",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		MinReadyPeers:     1,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.Ready(context.Background()); err == nil {
+		t.Fatalf("expected readiness to fail without verified peers")
+	} else if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("expected ErrNotReady, got %v", err)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		c.setPeerState("peer-1", "127.0.0.1:1", PeerStateVerified, "")
+	}()
+	if err := c.WaitReady(waitCtx); err != nil {
+		t.Fatalf("expected WaitReady after verified peer: %v", err)
+	}
+	c.setPeerState("peer-1", "127.0.0.1:1", PeerStateVerified, "")
+	if err := c.Ready(context.Background()); err != nil {
+		t.Fatalf("expected readiness after verified peer: %v", err)
+	}
+	status := c.Status()
+	if !status.Ready || status.VerifiedPeers != 1 {
+		t.Fatalf("unexpected status: %+v", status)
+	}
+}
+
+func TestStartRequiresSharedKeyUnlessInsecureAllowed(t *testing.T) {
+	opts := Options{
+		NodeName:          "node-secure-default",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		ReplicationFactor: 1,
+	}
+	if c, err := Start(opts); err == nil {
+		_ = c.Close()
+		t.Fatalf("expected Start without shared key to fail by default")
+	}
+
+	opts.AllowInsecure = true
+	c, err := Start(opts)
+	if err != nil {
+		t.Fatalf("expected explicit insecure mode to start: %v", err)
+	}
+	defer c.Close()
+}
+
+func TestStartCleansUpClusterWhenControlListenFails(t *testing.T) {
+	gossipPort := getFreePort(t)
+	controlPort := getFreePort(t)
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", controlPort))
+	if err != nil {
+		t.Fatalf("listen occupied control port: %v", err)
+	}
+	defer l.Close()
+
+	_, err = Start(Options{
+		NodeName:        "cleanup-failed-start",
+		ControlBindAddr: "127.0.0.1",
+		ControlBindPort: controlPort,
+		GossipBindAddr:  "127.0.0.1",
+		GossipBindPort:  gossipPort,
+		SharedKey:       "test-key",
+	})
+	if err == nil {
+		t.Fatalf("expected occupied control port to fail start")
+	}
+
+	c, err := Start(Options{
+		NodeName:        "cleanup-reuse-gossip",
+		ControlBindAddr: "127.0.0.1",
+		ControlBindPort: getFreePort(t),
+		GossipBindAddr:  "127.0.0.1",
+		GossipBindPort:  gossipPort,
+		SharedKey:       "test-key",
+	})
+	if err != nil {
+		t.Fatalf("start after failed start reused gossip port: %v", err)
+	}
+	defer c.Close()
+}
+
+func TestMetricsStartFailureIsReturned(t *testing.T) {
+	metricsPort := getFreePort(t)
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", metricsPort))
+	if err != nil {
+		t.Fatalf("listen metrics port: %v", err)
+	}
+	defer ln.Close()
+
+	c, err := Start(Options{
+		NodeName:          "node-metrics-conflict",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 1,
+		MetricsBindAddr:   "127.0.0.1",
+		MetricsBindPort:   metricsPort,
+	})
+	if err == nil {
+		_ = c.Close()
+		t.Fatalf("expected metrics bind conflict to fail Start")
+	}
+}
+
+func TestResolveDNSSeedsHonorsContext(t *testing.T) {
+	c := &DistributedCache{opts: Options{
+		SeedDNSName:    "localhost",
+		SeedDNSPort:    8946,
+		GossipBindPort: 8946,
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := c.resolveDNSSeeds(ctx); err == nil {
+		t.Fatalf("expected canceled DNS context to return an error")
+	}
+}
+
+func TestResolveDNSSeeds(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:            "node-dns-seeds",
+		ControlBindAddr:     "127.0.0.1",
+		ControlBindPort:     getFreePort(t),
+		GossipBindAddr:      "127.0.0.1",
+		GossipBindPort:      getFreePort(t),
+		SharedKey:           "test-key",
+		ReplicationFactor:   2,
+		SeedDNSName:         "localhost",
+		SeedDNSPort:         8946,
+		SeedRefreshInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	seeds, err := c.resolveDNSSeeds(context.Background())
+	if err != nil {
+		t.Fatalf("resolveDNSSeeds: %v", err)
+	}
+	if len(seeds) == 0 {
+		t.Fatalf("expected at least one localhost seed")
+	}
+	for _, seed := range seeds {
+		_, port, err := net.SplitHostPort(seed)
+		if err != nil {
+			t.Fatalf("seed %q is not host:port: %v", seed, err)
+		}
+		if port != "8946" {
+			t.Fatalf("seed %q used port %s, want 8946", seed, port)
+		}
+	}
+}
+
+func TestOwnershipCleanupChurnGrace(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "node-churn",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		ChurnGracePeriod:  100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	now := time.Now()
+	if !c.shouldDelayOwnershipCleanup("k", now) {
+		t.Fatalf("expected first ownership loss to be delayed")
+	}
+	if !c.shouldDelayOwnershipCleanup("k", now.Add(50*time.Millisecond)) {
+		t.Fatalf("expected ownership loss inside grace period to be delayed")
+	}
+	if c.shouldDelayOwnershipCleanup("k", now.Add(150*time.Millisecond)) {
+		t.Fatalf("expected ownership loss after grace period not to be delayed")
+	}
+	c.clearOwnershipLost("k")
+	if !c.shouldDelayOwnershipCleanup("k", now.Add(200*time.Millisecond)) {
+		t.Fatalf("expected ownership recovery to reset grace tracking")
 	}
 }
 
@@ -136,12 +442,56 @@ func keyOwnedByOtherNode(t *testing.T, c *DistributedCache) string {
 	return ""
 }
 
-func poisonVersionCounter(c *DistributedCache) uint64 {
-	future := uint64(time.Now().Add(24 * time.Hour).UnixNano())
+func poisonVersionCounter(c *DistributedCache) version.Version {
+	future := testVersion(time.Now().Add(24*time.Hour).UnixMilli(), "future")
 	c.versionMu.Lock()
 	c.lastVersion = future
 	c.versionMu.Unlock()
 	return future
+}
+
+func resetVersionCounter(c *DistributedCache) {
+	c.versionMu.Lock()
+	c.lastVersion = version.Zero()
+	c.versionMu.Unlock()
+}
+
+func TestNextVersionIncludesNodeIDTieBreaker(t *testing.T) {
+	physical := time.Now().Add(time.Hour).UnixMilli()
+	c1 := &DistributedCache{opts: Options{NodeName: "node-a"}}
+	c2 := &DistributedCache{opts: Options{NodeName: "node-b"}}
+	c1.lastVersion = testVersion(physical, "observed")
+	c2.lastVersion = testVersion(physical, "observed")
+
+	v1 := c1.nextVersion()
+	v2 := c2.nextVersion()
+	if v1.Compare(v2) == 0 {
+		t.Fatalf("versions should differ by node tie-breaker: %s", v1)
+	}
+	if v1.NodeID != "node-a" {
+		t.Fatalf("v1 node id = %q, want node-a", v1.NodeID)
+	}
+	if v2.NodeID != "node-b" {
+		t.Fatalf("v2 node id = %q, want node-b", v2.NodeID)
+	}
+}
+
+func TestNextVersionAdvancesFromObservedRemoteVersion(t *testing.T) {
+	physical := time.Now().Add(time.Hour).UnixMilli()
+	remote := version.Version{Physical: physical, Logical: 10, NodeID: "remote"}
+	c := &DistributedCache{opts: Options{NodeName: "local"}}
+	c.observeVersion(remote)
+
+	next := c.nextVersion()
+	if next.Compare(remote) <= 0 {
+		t.Fatalf("next version %s did not advance beyond observed remote %s", next, remote)
+	}
+	if next.Logical != 11 {
+		t.Fatalf("logical = %d, want 11", next.Logical)
+	}
+	if next.NodeID != "local" {
+		t.Fatalf("node id = %q, want local", next.NodeID)
+	}
 }
 
 func waitForControlAddr(t *testing.T, addr, sharedKey string, timeout time.Duration) {
@@ -346,6 +696,280 @@ func TestDistributedCacheReplicationAndForwarding(t *testing.T) {
 	waitForValue(t, c2, key, value, 2*time.Second)
 }
 
+func TestGetUsesLocalReplicaWhenOwnerControlPlaneFails(t *testing.T) {
+	gossip1 := getFreePort(t)
+	gossip2 := getFreePort(t)
+	control1 := getFreePort(t)
+	control2 := getFreePort(t)
+
+	c1, err := Start(Options{
+		NodeName:          "owner-node",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control1,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip1,
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("start owner: %v", err)
+	}
+	defer c1.Close()
+
+	c2, err := Start(Options{
+		NodeName:          "replica-node",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control2,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip2,
+		SeedNodes:         []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("start replica: %v", err)
+	}
+	defer c2.Close()
+
+	waitForMembers(t, c1, 2, 2*time.Second)
+	waitForMembers(t, c2, 2, 2*time.Second)
+	key := keyOwnedByOtherNode(t, c2)
+	value := []byte("replica-survives-owner-control-failure")
+	if err := c1.Set(context.Background(), key, value, time.Minute); err != nil {
+		t.Fatalf("set via owner: %v", err)
+	}
+	waitForStoreValue(t, c2, key, value, 2*time.Second)
+
+	c1.control.Stop()
+	got, found, err := c2.Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("get should fall back to local replica: %v", err)
+	}
+	if !found || string(got) != string(value) {
+		t.Fatalf("local replica get = found %v value %q, want %q", found, got, value)
+	}
+}
+
+func TestMajoritySetFailureIsIndeterminateAndLocallyVisible(t *testing.T) {
+	gossip1 := getFreePort(t)
+	gossip2 := getFreePort(t)
+	control1 := getFreePort(t)
+	control2 := getFreePort(t)
+
+	c1, err := Start(Options{
+		NodeName:          "majority-set-owner",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control1,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip1,
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		WriteConcern:      WriteConcernMajority,
+	})
+	if err != nil {
+		t.Fatalf("start owner: %v", err)
+	}
+	defer c1.Close()
+
+	c2, err := Start(Options{
+		NodeName:          "majority-set-replica",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control2,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip2,
+		SeedNodes:         []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		WriteConcern:      WriteConcernMajority,
+	})
+	if err != nil {
+		t.Fatalf("start replica: %v", err)
+	}
+	defer c2.Close()
+
+	waitForMembers(t, c1, 2, 2*time.Second)
+	waitForMembers(t, c2, 2, 2*time.Second)
+	key := keyOwnedByOtherNode(t, c2)
+	c2.control.Stop()
+
+	value := []byte("visible-after-indeterminate-set")
+	err = c1.Set(context.Background(), key, value, time.Minute)
+	if !errors.Is(err, ErrWriteIndeterminate) {
+		t.Fatalf("set error = %v, want ErrWriteIndeterminate", err)
+	}
+	got, found := c1.store.Get(key)
+	if !found || string(got) != string(value) {
+		t.Fatalf("owner local store = found %v value %q, want %q", found, got, value)
+	}
+}
+
+func TestMajorityDelFailureIsIndeterminateAndLocallyVisible(t *testing.T) {
+	gossip1 := getFreePort(t)
+	gossip2 := getFreePort(t)
+	control1 := getFreePort(t)
+	control2 := getFreePort(t)
+
+	c1, err := Start(Options{
+		NodeName:          "majority-del-owner",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control1,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip1,
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		WriteConcern:      WriteConcernMajority,
+	})
+	if err != nil {
+		t.Fatalf("start owner: %v", err)
+	}
+	defer c1.Close()
+
+	c2, err := Start(Options{
+		NodeName:          "majority-del-replica",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control2,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip2,
+		SeedNodes:         []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		WriteConcern:      WriteConcernMajority,
+	})
+	if err != nil {
+		t.Fatalf("start replica: %v", err)
+	}
+	defer c2.Close()
+
+	waitForMembers(t, c1, 2, 2*time.Second)
+	waitForMembers(t, c2, 2, 2*time.Second)
+	key := keyOwnedByOtherNode(t, c2)
+	value := []byte("delete-after-replication")
+	if err := c1.Set(context.Background(), key, value, time.Minute); err != nil {
+		t.Fatalf("initial set: %v", err)
+	}
+	waitForStoreValue(t, c2, key, value, 2*time.Second)
+
+	c2.control.Stop()
+	err = c1.Del(context.Background(), key)
+	if !errors.Is(err, ErrWriteIndeterminate) {
+		t.Fatalf("del error = %v, want ErrWriteIndeterminate", err)
+	}
+	entry, found := c1.store.GetEntry(key)
+	if !found || !entry.Tombstone {
+		t.Fatalf("owner local entry = found %v entry %+v, want tombstone", found, entry)
+	}
+}
+
+func TestForwardedMajoritySetFailureIsIndeterminate(t *testing.T) {
+	gossip1 := getFreePort(t)
+	gossip2 := getFreePort(t)
+	control1 := getFreePort(t)
+	control2 := getFreePort(t)
+	seed := fmt.Sprintf("127.0.0.1:%d", gossip1)
+
+	c1, err := Start(Options{
+		NodeName:          "forwarded-majority-set-caller",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control1,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip1,
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		WriteConcern:      WriteConcernMajority,
+	})
+	if err != nil {
+		t.Fatalf("start caller: %v", err)
+	}
+	defer c1.Close()
+
+	c2, err := Start(Options{
+		NodeName:          "forwarded-majority-set-owner",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control2,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip2,
+		SeedNodes:         []string{seed},
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		WriteConcern:      WriteConcernMajority,
+	})
+	if err != nil {
+		t.Fatalf("start owner: %v", err)
+	}
+	defer c2.Close()
+
+	waitForMembers(t, c1, 2, 2*time.Second)
+	waitForMembers(t, c2, 2, 2*time.Second)
+	key := keyOwnedByOtherNode(t, c1)
+	owner, _ := c1.cluster.GetNode().Get(key)
+	if owner != c2.cluster.GetNode().GetSelf() {
+		t.Fatalf("test expected key owner %s to be c2", owner)
+	}
+
+	c1.control.Stop()
+	err = c1.Set(context.Background(), key, []byte("forwarded-indeterminate"), time.Minute)
+	if !errors.Is(err, ErrWriteIndeterminate) {
+		t.Fatalf("set error = %v, want ErrWriteIndeterminate", err)
+	}
+}
+
+func TestForwardedMajorityDelFailureIsIndeterminate(t *testing.T) {
+	gossip1 := getFreePort(t)
+	gossip2 := getFreePort(t)
+	control1 := getFreePort(t)
+	control2 := getFreePort(t)
+	seed := fmt.Sprintf("127.0.0.1:%d", gossip1)
+
+	c1, err := Start(Options{
+		NodeName:          "forwarded-majority-del-caller",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control1,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip1,
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		WriteConcern:      WriteConcernMajority,
+	})
+	if err != nil {
+		t.Fatalf("start caller: %v", err)
+	}
+	defer c1.Close()
+
+	c2, err := Start(Options{
+		NodeName:          "forwarded-majority-del-owner",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control2,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip2,
+		SeedNodes:         []string{seed},
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		WriteConcern:      WriteConcernMajority,
+	})
+	if err != nil {
+		t.Fatalf("start owner: %v", err)
+	}
+	defer c2.Close()
+
+	waitForMembers(t, c1, 2, 2*time.Second)
+	waitForMembers(t, c2, 2, 2*time.Second)
+	key := keyOwnedByOtherNode(t, c1)
+	owner, _ := c1.cluster.GetNode().Get(key)
+	if owner != c2.cluster.GetNode().GetSelf() {
+		t.Fatalf("test expected key owner %s to be c2", owner)
+	}
+	if err := c1.Set(context.Background(), key, []byte("delete-me"), time.Minute); err != nil {
+		t.Fatalf("initial set: %v", err)
+	}
+	waitForStoreValue(t, c2, key, []byte("delete-me"), 2*time.Second)
+
+	c1.control.Stop()
+	err = c1.Del(context.Background(), key)
+	if !errors.Is(err, ErrWriteIndeterminate) {
+		t.Fatalf("del error = %v, want ErrWriteIndeterminate", err)
+	}
+}
+
 func TestDistributedCacheCloseIsIdempotent(t *testing.T) {
 	c, err := Start(Options{
 		NodeName:          "node-close",
@@ -364,6 +988,61 @@ func TestDistributedCacheCloseIsIdempotent(t *testing.T) {
 	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("second close: %v", err)
+	}
+}
+
+func TestDistributedCacheOperationsAfterCloseReturnErrClosed(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "node-closed-contract",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 1,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	status := c.Status()
+	if !status.Closed {
+		t.Fatalf("status closed=false, want true: %+v", status)
+	}
+	if status.Ready {
+		t.Fatalf("status ready=true after close: %+v", status)
+	}
+	if status.ControlReady {
+		t.Fatalf("status control ready=true after close: %+v", status)
+	}
+	if err := c.Ready(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Ready error = %v, want ErrClosed", err)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := c.WaitReady(waitCtx); !errors.Is(err, ErrClosed) {
+		t.Fatalf("WaitReady error = %v, want ErrClosed", err)
+	}
+	if _, _, err := c.Get(context.Background(), "k"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Get error = %v, want ErrClosed", err)
+	}
+	if err := c.Set(context.Background(), "k", []byte("v"), time.Minute); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Set error = %v, want ErrClosed", err)
+	}
+	if err := c.Del(context.Background(), "k"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Del error = %v, want ErrClosed", err)
+	}
+	if _, _, err := c.Fetch(context.Background(), "k"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Fetch error = %v, want ErrClosed", err)
+	}
+	if err := c.Store(context.Background(), "k", []byte("v"), time.Minute, version.Zero(), control.WriteConcernOne); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Store error = %v, want ErrClosed", err)
+	}
+	if err := c.Delete(context.Background(), "k", version.Zero(), control.WriteConcernOne); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Delete error = %v, want ErrClosed", err)
 	}
 }
 
@@ -420,11 +1099,11 @@ func TestForwardedPublicSetUsesOwnerAssignedVersion(t *testing.T) {
 		t.Fatalf("set: %v", err)
 	}
 	entry := waitForStoreEntry(t, ownerCache, key, 2*time.Second)
-	if entry.Version == 0 {
+	if entry.Version.IsZero() {
 		t.Fatalf("owner did not assign version")
 	}
-	if entry.Version >= future {
-		t.Fatalf("forwarded set used caller version %d >= poisoned caller version %d", entry.Version, future)
+	if entry.Version.Compare(future) >= 0 {
+		t.Fatalf("forwarded set used caller version %s >= poisoned caller version %s", entry.Version, future)
 	}
 }
 
@@ -484,8 +1163,77 @@ func TestForwardedPublicDelUsesOwnerAssignedVersion(t *testing.T) {
 	if !entry.Tombstone {
 		t.Fatalf("expected tombstone, got %+v", entry)
 	}
-	if entry.Version >= future {
-		t.Fatalf("forwarded del used caller version %d >= poisoned caller version %d", entry.Version, future)
+	if entry.Version.Compare(future) >= 0 {
+		t.Fatalf("forwarded del used caller version %s >= poisoned caller version %s", entry.Version, future)
+	}
+}
+
+func TestLocalSetAdvancesBeyondObservedTombstoneVersion(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "node-version-set",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	key := "observed-tombstone"
+	observed := testVersion(time.Now().Add(24*time.Hour).UnixMilli(), "future")
+	if err := c.deleteLocalVersioned(key, observed); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+	resetVersionCounter(c)
+
+	value := []byte("after-observed-tombstone")
+	if err := c.Set(context.Background(), key, value, time.Minute); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	entry := waitForStoreEntry(t, c, key, time.Second)
+	if entry.Tombstone || string(entry.Value) != string(value) {
+		t.Fatalf("entry=%+v, want value %q", entry, value)
+	}
+	if entry.Version.Compare(observed) <= 0 {
+		t.Fatalf("version %s did not advance beyond observed %s", entry.Version, observed)
+	}
+}
+
+func TestLocalDeleteAdvancesBeyondObservedValueVersion(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "node-version-del",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	key := "observed-value"
+	observed := testVersion(time.Now().Add(24*time.Hour).UnixMilli(), "future")
+	if err := c.storeLocalVersioned(key, []byte("observed"), time.Minute, observed); err != nil {
+		t.Fatalf("seed value: %v", err)
+	}
+	resetVersionCounter(c)
+
+	if err := c.Del(context.Background(), key); err != nil {
+		t.Fatalf("del: %v", err)
+	}
+	entry := waitForStoreEntry(t, c, key, time.Second)
+	if !entry.Tombstone {
+		t.Fatalf("entry=%+v, want tombstone", entry)
+	}
+	if entry.Version.Compare(observed) <= 0 {
+		t.Fatalf("version %s did not advance beyond observed %s", entry.Version, observed)
 	}
 }
 
@@ -502,6 +1250,64 @@ func TestRetryTTLUsesAbsoluteExpiry(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	if ttl, ok := ttlUntil(expiresAt, time.Minute); ok {
 		t.Fatalf("ttlUntil returned ok after expiry with ttl=%v", ttl)
+	}
+}
+
+func TestRetrySchedulerReleasesDelayedRetry(t *testing.T) {
+	c := &DistributedCache{
+		logger:       internallog.Default(),
+		retryCh:      make(chan retryTask, 1),
+		retryDelayCh: make(chan scheduledRetryTask, 1),
+		retryStop:    make(chan struct{}),
+		opts: Options{
+			ReplicationRetryInterval:    10 * time.Millisecond,
+			ReplicationRetryMaxAttempts: 2,
+			ReplicationRetryQueueSize:   1,
+		},
+	}
+	c.retryWg.Add(1)
+	go func() {
+		defer c.retryWg.Done()
+		c.runRetryScheduler()
+	}()
+	defer func() {
+		close(c.retryStop)
+		c.retryWg.Wait()
+	}()
+
+	c.scheduleRetry(retryTask{kind: retryDelete, addr: "127.0.0.1:1", key: "k", version: testVersion(1, "retry"), attempts: 1})
+	select {
+	case task := <-c.retryCh:
+		if task.key != "k" || task.attempts != 2 {
+			t.Fatalf("retry task = %+v, want key k attempts 2", task)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for delayed retry")
+	}
+}
+
+func TestRetrySchedulerDelayedQueueIsBounded(t *testing.T) {
+	c := &DistributedCache{
+		logger:       internallog.Default(),
+		retryCh:      make(chan retryTask, 1),
+		retryDelayCh: make(chan scheduledRetryTask, 1),
+		retryStop:    make(chan struct{}),
+		opts: Options{
+			ReplicationRetryInterval:    time.Hour,
+			ReplicationRetryMaxAttempts: 2,
+			ReplicationRetryQueueSize:   1,
+		},
+	}
+	defer close(c.retryStop)
+
+	c.scheduleRetry(retryTask{kind: retryDelete, addr: "127.0.0.1:1", key: "first", version: testVersion(1, "retry"), attempts: 1})
+	c.scheduleRetry(retryTask{kind: retryDelete, addr: "127.0.0.1:1", key: "second", version: testVersion(1, "retry"), attempts: 1})
+	if got := len(c.retryDelayCh); got != 1 {
+		t.Fatalf("delayed retry queue length = %d, want bounded length 1", got)
+	}
+	scheduled := <-c.retryDelayCh
+	if scheduled.task.key != "first" {
+		t.Fatalf("scheduled task key = %q, want first", scheduled.task.key)
 	}
 }
 
