@@ -124,6 +124,10 @@ The script is intentionally example-specific. It is not a generic production val
 ```bash
 DOCKER_CONTEXT=default ./chaos.sh
 STACK_NAME=dcache ./chaos.sh
+STACK_FILE=/path/to/docker-stack.yml ./chaos.sh
+STACK_SERVICE_NAME=web ./chaos.sh
+SERVICE_NAME=dcache_web ./chaos.sh
+PRINT_CONFIG=1 ./chaos.sh
 REPLICAS=5 ./chaos.sh
 WAIT_SECONDS=180 ./chaos.sh
 STEADY_SECONDS=15 ./chaos.sh
@@ -138,6 +142,15 @@ GOSSIP_DEGRADATION_MODE=fail ./chaos.sh
 `CLEANUP=1` removes the stack when the script exits. `DEBUG_LOG_LINES` controls
 how many Docker service log lines are printed only when the harness fails; logs
 are not used for normal assertions.
+`STACK_FILE` selects the stack manifest to deploy. Relative paths are resolved
+from the current directory when they exist, then from this `examples/swarm`
+directory. `STACK_SERVICE_NAME` is the service name inside the stack file and
+defaults to `app`, so the Swarm service defaults to
+`${STACK_NAME}_${STACK_SERVICE_NAME}`. Set `SERVICE_NAME` only when you need to
+target a full precomputed Swarm service name.
+`PRINT_CONFIG=1` prints the resolved Docker context, stack file, stack name,
+stack service name, full Swarm service name, and image without building or
+deploying anything.
 `STEADY_SECONDS` controls the quiet period before the final steady-state gossip
 check.
 If `HARNESS_URL` is not set, the script finds a running task node and calls the

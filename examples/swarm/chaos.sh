@@ -24,8 +24,16 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 DOCKER_CONTEXT="${DOCKER_CONTEXT:-default}"
 STACK_NAME="${STACK_NAME:-example}"
-SERVICE_NAME="${STACK_NAME}_app"
-NETWORK_NAME="${STACK_NAME}_cache_control"
+STACK_FILE="${STACK_FILE:-docker-stack.yml}"
+if [[ "${STACK_FILE}" != /* ]]; then
+	if [[ -f "${STACK_FILE}" ]]; then
+		STACK_FILE="$(cd "$(dirname "${STACK_FILE}")" && pwd)/$(basename "${STACK_FILE}")"
+	else
+		STACK_FILE="${SCRIPT_DIR}/${STACK_FILE}"
+	fi
+fi
+STACK_SERVICE_NAME="${STACK_SERVICE_NAME:-app}"
+SERVICE_NAME="${SERVICE_NAME:-${STACK_NAME}_${STACK_SERVICE_NAME}}"
 IMAGE="${IMAGE:-distributed-cache-example-app:latest}"
 REPLICAS="${REPLICAS:-3}"
 WAIT_SECONDS="${WAIT_SECONDS:-120}"
@@ -36,6 +44,7 @@ HARNESS_URL="${HARNESS_URL:-${APP_URL:-}}"
 HARNESS_TRANSPORT="${HARNESS_TRANSPORT:-host}"
 HARNESS_HOST_PORT="${HARNESS_HOST_PORT:-18080}"
 GOSSIP_DEGRADATION_MODE="${GOSSIP_DEGRADATION_MODE:-warn}"
+PRINT_CONFIG="${PRINT_CONFIG:-0}"
 export PLACEMENT_CONSTRAINT
 
 docker_cmd() {
@@ -184,11 +193,8 @@ build_image() {
 }
 
 deploy_stack() {
-	log "deploying stack ${STACK_NAME}"
-	(
-		cd "${SCRIPT_DIR}"
-		docker_cmd stack deploy -c docker-stack.yml "${STACK_NAME}"
-	)
+	log "deploying stack ${STACK_NAME} from ${STACK_FILE}"
+	docker_cmd stack deploy -c "${STACK_FILE}" "${STACK_NAME}"
 }
 
 scale_service() {
@@ -493,6 +499,15 @@ cleanup_stack() {
 }
 
 main() {
+	if [[ "${PRINT_CONFIG}" == "1" ]]; then
+		printf 'DOCKER_CONTEXT=%s\n' "${DOCKER_CONTEXT}"
+		printf 'STACK_NAME=%s\n' "${STACK_NAME}"
+		printf 'STACK_FILE=%s\n' "${STACK_FILE}"
+		printf 'STACK_SERVICE_NAME=%s\n' "${STACK_SERVICE_NAME}"
+		printf 'SERVICE_NAME=%s\n' "${SERVICE_NAME}"
+		printf 'IMAGE=%s\n' "${IMAGE}"
+		return
+	fi
 	trap cleanup_stack EXIT
 	require_swarm
 	build_image
