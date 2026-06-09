@@ -230,11 +230,24 @@ optional export path, not a prerequisite for diagnostics or cache correctness.
 
 ## Security Defaults
 
-`SharedKey` is required by default. This protects memberlist gossip encryption and
-gRPC control-plane authentication from being accidentally disabled in deployed
-services.
+`SharedKey` protects memberlist gossip encryption and gRPC control-plane
+authentication. The key is only for cache nodes; external clients do not need to
+know it.
 
-For local-only development without a shared key, opt in explicitly:
+If `common.cache.shared_key` / `CACHE_SHARED_KEY` is not configured and
+`AllowInsecure` is false, the cache generates an ephemeral internal key for the
+current process and logs that it did so without logging the value. This avoids
+accidentally starting an unauthenticated control plane.
+
+For multi-node deployments, every cache node still needs the same key. Provide
+that shared value through layered config, env, or a secret manager. If each node
+generates its own key, nodes will start but will not authenticate with one
+another.
+
+Set `RequireSharedKey` / `common.cache.diagnostics.require_shared_key` when a
+deployment should fail startup unless the key is explicitly configured.
+
+For local-only development with no auth/encryption key at all, opt in explicitly:
 
 ```go
 c, err := dcache.Start(dcache.Options{

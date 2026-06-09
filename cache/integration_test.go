@@ -253,33 +253,64 @@ func TestReadyRequiresMinimumVerifiedPeers(t *testing.T) {
 	}
 }
 
-func TestStartRequiresSharedKeyUnlessInsecureAllowed(t *testing.T) {
+func TestStartGeneratesSharedKeyUnlessInsecureAllowed(t *testing.T) {
 	opts := Options{
-		NodeName:          "node-secure-default",
+		NodeName:          "node-generated-shared-key",
 		ControlBindAddr:   "127.0.0.1",
 		ControlBindPort:   getFreePort(t),
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    getFreePort(t),
 		ReplicationFactor: 1,
 	}
+	c, err := Start(opts)
+	if err != nil {
+		t.Fatalf("expected generated shared key startup: %v", err)
+	}
+	if c.opts.SharedKey == "" {
+		t.Fatalf("expected generated shared key")
+	}
+	if c.opts.SharedKey == "dev-shared-key" || c.opts.SharedKey == "test-key" {
+		t.Fatalf("generated shared key used a static example value")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close generated shared key cache: %v", err)
+	}
+
+	opts.AllowInsecure = true
+	opts.NodeName = "node-explicit-insecure"
+	opts.ControlBindPort = getFreePort(t)
+	opts.GossipBindPort = getFreePort(t)
+	c, err = Start(opts)
+	if err != nil {
+		t.Fatalf("expected explicit insecure mode to start: %v", err)
+	}
+	if c.opts.SharedKey != "" {
+		t.Fatalf("explicit insecure mode generated shared key %q, want empty", c.opts.SharedKey)
+	}
+	defer c.Close()
+}
+
+func TestStartRequiresConfiguredSharedKeyWhenPolicyEnabled(t *testing.T) {
+	opts := Options{
+		NodeName:          "node-require-shared-key",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		ReplicationFactor: 1,
+		RequireSharedKey:  true,
+	}
 	if c, err := Start(opts); err == nil {
 		_ = c.Close()
-		t.Fatalf("expected Start without shared key to fail by default")
+		t.Fatalf("expected Start with require_shared_key and no shared key to fail")
 	} else {
 		msg := err.Error()
-		for _, want := range []string{"common.cache.shared_key", "config.secrets.yml", "CACHE_SHARED_KEY", "CACHE_ALLOW_INSECURE"} {
+		for _, want := range []string{"common.cache.shared_key", "config.secrets.yml", "CACHE_SHARED_KEY"} {
 			if !strings.Contains(msg, want) {
 				t.Fatalf("missing shared key error %q did not mention %q", msg, want)
 			}
 		}
 	}
-
-	opts.AllowInsecure = true
-	c, err := Start(opts)
-	if err != nil {
-		t.Fatalf("expected explicit insecure mode to start: %v", err)
-	}
-	defer c.Close()
 }
 
 func TestStartCleansUpClusterWhenControlListenFails(t *testing.T) {

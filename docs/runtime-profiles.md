@@ -213,9 +213,16 @@ resilience.
 
 ## Security
 
-Production deployments should set `SharedKey`. Starting without a shared key
-requires explicit insecure opt-in with `AllowInsecure` or
-`CACHE_ALLOW_INSECURE=true`.
+Production deployments should set the same `SharedKey` on every cache node. If
+no key is configured and insecure mode is not enabled, each process generates an
+ephemeral internal key and logs that fact without logging the value. That keeps a
+single process authenticated by default, but different nodes with independently
+generated keys will not authenticate with each other.
+
+Use `RequireSharedKey` or `common.cache.diagnostics.require_shared_key` when a
+deployment should fail startup unless the shared key is explicitly configured.
+Use `AllowInsecure` or `CACHE_ALLOW_INSECURE=true` only for local development
+when you intentionally want to run without a key.
 
 Use TLS or mTLS when the private runtime network is not enough for the service's
 threat model. TLS settings live under `common.cache.cluster.tls`.

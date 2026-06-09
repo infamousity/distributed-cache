@@ -3,8 +3,10 @@ package cache
 import (
 	"container/heap"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -463,6 +465,9 @@ func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error
 	logger := log.Default()
 
 	if err := validateConfig(cfg, opts); err != nil {
+		return nil, err
+	}
+	if err := ensureSharedKey(cfg, &opts, logger); err != nil {
 		return nil, err
 	}
 
@@ -2018,11 +2023,8 @@ func validateConfig(cfg *config.Config, opts Options) error {
 	if cfg.Common.Cache.Cluster.MemberList.SeedDNSName != "" && cfg.Common.Cache.Cluster.MemberList.SeedDNSPort < 0 {
 		return fmt.Errorf("seed_dns_port must be >= 0")
 	}
-	if cfg.Common.Cache.SharedKey == "" && !opts.AllowInsecure {
-		return missingSharedKeyError()
-	}
 	if opts.RequireSharedKey && cfg.Common.Cache.SharedKey == "" {
-		return fmt.Errorf("diagnostics.require_shared_key enabled but shared_key is empty: %w", missingSharedKeyError())
+		return fmt.Errorf("diagnostics.require_shared_key enabled but common.cache.shared_key is empty; set common.cache.shared_key in a later config file such as -c config.yml -c config.secrets.yml, or set CACHE_SHARED_KEY")
 	}
 	if cfg.Common.Cache.Control.AdvertiseAddr != "" {
 		if err := validateControlAdvertiseAddr(cfg.Common.Cache.Control.AdvertiseAddr); err != nil {
@@ -2038,8 +2040,28 @@ func validateConfig(cfg *config.Config, opts Options) error {
 	return nil
 }
 
-func missingSharedKeyError() error {
-	return fmt.Errorf("common.cache.shared_key is required by default; set common.cache.shared_key in a later config file such as -c config.yml -c config.secrets.yml, set CACHE_SHARED_KEY, or enable common.cache.diagnostics.allow_insecure / CACHE_ALLOW_INSECURE=true for local development only")
+func ensureSharedKey(cfg *config.Config, opts *Options, logger log.Interface) error {
+	if cfg.Common.Cache.SharedKey != "" || opts.AllowInsecure {
+		return nil
+	}
+	key, err := generateSharedKey()
+	if err != nil {
+		return err
+	}
+	cfg.Common.Cache.SharedKey = key
+	opts.SharedKey = key
+	if logger != nil {
+		logger.Warnf("common.cache.shared_key was not configured; generated an ephemeral internal shared key for this process (value hidden). For multi-node deployments, provide the same key to every node via -c config.yml -c config.secrets.yml, CACHE_SHARED_KEY, or a secret manager; nodes with different generated keys will not authenticate with each other.")
+	}
+	return nil
+}
+
+func generateSharedKey() (string, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate shared key: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
 }
 
 func validateControlAdvertiseAddr(addr string) error {
