@@ -8,6 +8,7 @@
 !README.md
 !docs/*.md
 !examples/kubernetes/*.yaml
+!examples/swarm/docker-stack.yml
 !LICENSE
 !config.yml
 !docker-compose.yml
