@@ -6,8 +6,11 @@
 !go.sum
 !go.mod
 !README.md
+!docs/*.md
+!examples/kubernetes/*.yaml
 !LICENSE
 !config.yml
 !docker-compose.yml
 !Dockerfile
+!examples/swarm/chaos.sh
 !*/

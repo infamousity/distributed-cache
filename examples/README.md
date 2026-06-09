@@ -26,7 +26,7 @@ Terminal 2:
 go run ./examples/multi -name node-2 -control-port 9091 -gossip-port 8947 -seeds 127.0.0.1:8946
 ```
 
-Both nodes wait briefly for gossip membership, then `node-1` writes through the public cache API. If the key is owned by another node, the write is forwarded with owner-assigned versioning. Both terminals should then print the replicated value.
+Both nodes wait briefly for gossip membership, then `node-1` writes through the in-process cache API. If the key is owned by another node, the write is forwarded with owner-assigned versioning. Both terminals should then print the replicated value.
 
 Notes:
 - Ports must be unique per node when running locally.
