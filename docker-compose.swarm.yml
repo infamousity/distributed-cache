@@ -11,7 +11,16 @@ services:
       mode: replicated
       replicas: 3
     environment:
+      CACHE_CLUSTER_MEMBERLIST_NODE_NAME: "{{.Task.Name}}"
+      CACHE_API_BIND_ADDR: "0.0.0.0"
+      CACHE_API_BIND_PORT: 9090
+      CACHE_CLUSTER_MEMBERLIST_BIND_ADDRESS: "0.0.0.0"
+      CACHE_CLUSTER_MEMBERLIST_BIND_PORT: 8946
+      CACHE_CLUSTER_MEMBERLIST_SEED_DNS_NAME: tasks.cache
+      CACHE_CLUSTER_MEMBERLIST_SEED_DNS_PORT: 8946
       CACHE_CLUSTER_MEMBERLIST_SEED_NODES: tasks.cache:8946
+      CACHE_SHARED_KEY: change-me
+      CACHE_DIAGNOSTICS_MIN_READY_PEERS: 2
 
 networks:
   cache_control:

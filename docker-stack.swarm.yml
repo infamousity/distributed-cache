@@ -10,16 +10,20 @@ services:
       mode: replicated
       replicas: 3
     environment:
-      # Your service should pass these through to cache.Start(Options{...}).
+      # These names match config.Load / StartFromConfigFiles env bindings.
+      # If your service calls cache.Start(Options{...}) directly, map these
+      # deployment values into Options in your own config layer.
       # The cache data plane is in-process; peer coordination uses the gRPC control plane.
-      CACHE_NODE_NAME: "{{.Task.Name}}"
-      CACHE_CONTROL_BIND_ADDR: "0.0.0.0"
-      CACHE_CONTROL_BIND_PORT: 9090
-      CACHE_GOSSIP_BIND_ADDR: "0.0.0.0"
-      CACHE_GOSSIP_BIND_PORT: 8946
-      CACHE_SEED_NODES: tasks.app:8946
+      CACHE_CLUSTER_MEMBERLIST_NODE_NAME: "{{.Task.Name}}"
+      CACHE_API_BIND_ADDR: "0.0.0.0"
+      CACHE_API_BIND_PORT: 9090
+      CACHE_CLUSTER_MEMBERLIST_BIND_ADDRESS: "0.0.0.0"
+      CACHE_CLUSTER_MEMBERLIST_BIND_PORT: 8946
+      CACHE_CLUSTER_MEMBERLIST_SEED_DNS_NAME: tasks.app
+      CACHE_CLUSTER_MEMBERLIST_SEED_DNS_PORT: 8946
       CACHE_SHARED_KEY: change-me
       CACHE_TOMBSTONE_TTL_MS: 300000
+      CACHE_DIAGNOSTICS_MIN_READY_PEERS: 2
 
 networks:
   app_net:
