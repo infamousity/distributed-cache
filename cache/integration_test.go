@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -264,6 +265,13 @@ func TestStartRequiresSharedKeyUnlessInsecureAllowed(t *testing.T) {
 	if c, err := Start(opts); err == nil {
 		_ = c.Close()
 		t.Fatalf("expected Start without shared key to fail by default")
+	} else {
+		msg := err.Error()
+		for _, want := range []string{"common.cache.shared_key", "config.secrets.yml", "CACHE_SHARED_KEY", "CACHE_ALLOW_INSECURE"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("missing shared key error %q did not mention %q", msg, want)
+			}
+		}
 	}
 
 	opts.AllowInsecure = true

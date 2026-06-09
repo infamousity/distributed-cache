@@ -2019,10 +2019,10 @@ func validateConfig(cfg *config.Config, opts Options) error {
 		return fmt.Errorf("seed_dns_port must be >= 0")
 	}
 	if cfg.Common.Cache.SharedKey == "" && !opts.AllowInsecure {
-		return fmt.Errorf("shared_key is required unless diagnostics.allow_insecure is enabled")
+		return missingSharedKeyError()
 	}
 	if opts.RequireSharedKey && cfg.Common.Cache.SharedKey == "" {
-		return fmt.Errorf("diagnostics.require_shared_key enabled but shared_key is empty")
+		return fmt.Errorf("diagnostics.require_shared_key enabled but shared_key is empty: %w", missingSharedKeyError())
 	}
 	if cfg.Common.Cache.Control.AdvertiseAddr != "" {
 		if err := validateControlAdvertiseAddr(cfg.Common.Cache.Control.AdvertiseAddr); err != nil {
@@ -2036,6 +2036,10 @@ func validateConfig(cfg *config.Config, opts Options) error {
 		}
 	}
 	return nil
+}
+
+func missingSharedKeyError() error {
+	return fmt.Errorf("common.cache.shared_key is required by default; set common.cache.shared_key in a later config file such as -c config.yml -c config.secrets.yml, set CACHE_SHARED_KEY, or enable common.cache.diagnostics.allow_insecure / CACHE_ALLOW_INSECURE=true for local development only")
 }
 
 func validateControlAdvertiseAddr(addr string) error {

@@ -100,8 +100,21 @@ v, found, _ := c.Get(ctx, "k", dcache.WithNamespace("tenant-1"))
 The CLI starts a cache node using config files:
 
 ```bash
-./cache-node -c config.yml
+./cache-node -c config.yml -c config.secrets.yml
 ```
+
+Config files are merged from left to right, so keep non-secret defaults in
+`config.yml` and layer secrets at runtime with a later file such as
+`config.secrets.yml`. That secrets file is intentionally local/untracked; create
+it on the target host or mount it from your secret manager:
+
+```yaml
+common:
+  cache:
+    shared_key: "${CACHE_SHARED_KEY}"
+```
+
+Do not put production shared keys in the base config.
 
 ## Swarm
 

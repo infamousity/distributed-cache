@@ -3,7 +3,6 @@ common:
     log:
       level: info
     size_bytes: 1_073_741_824
-    shared_key: dev-shared-key
     api:
       bind_addr: "{{ ip }}"
       bind_port: 9090
