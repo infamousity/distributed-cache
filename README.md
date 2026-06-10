@@ -34,7 +34,7 @@ func main() {
     ControlAdvertiseAddr: "10.0.0.12:9090",
     GossipBindAddr:       "10.0.0.12",
     GossipBindPort:       8946,
-    SeedNodes:            []string{"10.0.0.10:8946"},
+    PeerNodes:            []string{"10.0.0.10:8946"},
     SharedKey:            "super-secret",
     ReplicationFactor:    3,
   })
@@ -134,7 +134,7 @@ docker stack deploy -c docker-stack.swarm.yml app
 
 Notes:
 - `cache_control` is an internal, encrypted overlay network to isolate control-plane traffic.
-- In application stacks, each app replica embeds the cache and uses `tasks.<service>` for gossip seed discovery.
+- In application stacks, each app replica embeds the cache and uses `tasks.<service>` for gossip peer discovery.
 - The library cache API is in-process; any HTTP/JSON/GraphQL/etc. route that uses the cache is owned by the host service.
 - The gRPC control plane is only for node-to-node coordination. Do not publish gossip or control-plane ports externally.
 
@@ -161,8 +161,8 @@ orchestrator. A runtime only needs to satisfy these contracts:
 - every node advertises a peer-reachable gossip address and port
 - every node binds the gRPC control plane on a reachable TCP port
 - every node advertises a peer-reachable gRPC control-plane `host:port`
-- peers can discover at least one live seed through static `SeedNodes` or DNS
-  seed refresh
+- peers can discover at least one live peer through static `PeerNodes` or DNS
+  peer refresh
 - gossip and gRPC control-plane traffic stay on private/internal networks
 - `SharedKey` is configured consistently across all nodes
 
@@ -172,15 +172,15 @@ node-to-node control-plane RPC layer used for fetch/store/delete/ping.
 
 Runtime-specific notes:
 
-- **Docker Swarm:** use `tasks.<service>` as the DNS seed name for task-level
+- **Docker Swarm:** use `tasks.<service>` as the DNS peer name for task-level
   discovery. Put gossip and gRPC control-plane traffic on an internal overlay
   network. If the overlay is multi-host, allow both TCP and UDP on the gossip
   port and TCP on the control-plane port between tasks.
-- **Kubernetes:** prefer a headless Service for DNS seed discovery and set
+- **Kubernetes:** prefer a headless Service for DNS peer discovery and set
   advertised addresses to pod-reachable IPs or stable DNS names. NetworkPolicy
   should allow TCP/UDP gossip between pods and TCP gRPC control-plane traffic
   between pods, while denying external ingress to those ports.
-- **Podman / systemd / VMs:** use static `SeedNodes` or a DNS name that resolves
+- **Podman / systemd / VMs:** use static `PeerNodes` or a DNS name that resolves
   to peer addresses. Ensure host firewalls allow the gossip TCP/UDP port and the
   gRPC control-plane TCP port between nodes only.
 
@@ -274,7 +274,10 @@ TLS is optional and configured in `common.cache.cluster.tls`. To enable mutual T
 
 - The config `common.cache.api` section now defines the **control-plane** bind address/port.
 - `common.cache.api.advertise_addr` may be set to the peer-reachable `host:port` for the control plane. This is separate from memberlist gossip advertisement and is useful in runtimes where bind and peer-reachable addresses differ.
-- `common.cache.cluster.memberlist.seed_dns_name` plus `seed_dns_port` enables generic DNS seed discovery with periodic refresh; static `seed_nodes` still works.
+- `common.cache.cluster.memberlist.peer_dns_name` plus `peer_dns_port` enables generic DNS peer discovery with periodic refresh; static `peer_nodes` still works.
+- Config templates support `peerIP "dns.name"` and `peerAddr "dns.name" port`
+  helpers for advertise addresses. They select this node's local IPv4 address
+  on the same subnet as the resolved peer DNS records.
 - `common.cache.churn.grace_period_ms` delays only ownership-loss cleanup during membership churn. Explicit deletes still write tombstones immediately.
 - The library cache data-plane is always in-process; the library does not expose
   an HTTP CRUD API. Host services may expose cache-backed routes as part of their

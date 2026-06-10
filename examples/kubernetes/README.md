@@ -5,7 +5,7 @@ is intentionally a deployment profile, not a new cache server mode.
 
 The important pieces are:
 
-- a headless Service for pod-level DNS seed discovery
+- a headless Service for pod-level DNS peer discovery
 - a StatefulSet for stable pod names
 - pod IP advertisement for memberlist gossip and gRPC control-plane traffic
 - a Secret for the shared key
@@ -26,7 +26,7 @@ kubectl apply -f examples/kubernetes/manifests.yaml
 ```
 
 The example uses namespace `default`. If you deploy into a different namespace,
-update `CACHE_CLUSTER_MEMBERLIST_SEED_DNS_NAME` in the StatefulSet.
+update `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME` in the StatefulSet.
 
 ## Runtime Notes
 
@@ -41,8 +41,8 @@ The manifest uses canonical config-loader env names:
 - `CACHE_CLUSTER_MEMBERLIST_BIND_PORT`
 - `CACHE_CLUSTER_MEMBERLIST_ADVERTISE_ADDRESS`
 - `CACHE_CLUSTER_MEMBERLIST_ADVERTISE_PORT`
-- `CACHE_CLUSTER_MEMBERLIST_SEED_DNS_NAME`
-- `CACHE_CLUSTER_MEMBERLIST_SEED_DNS_PORT`
+- `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME`
+- `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT`
 - `CACHE_API_BIND_ADDR`
 - `CACHE_API_BIND_PORT`
 - `CACHE_CONTROL_ADVERTISE_ADDR`

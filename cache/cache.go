@@ -46,8 +46,8 @@ type DistributedCache struct {
 	retryWg           sync.WaitGroup
 	retryDelayedDepth atomic.Int64
 
-	seedStop chan struct{}
-	seedWg   sync.WaitGroup
+	peerStop chan struct{}
+	peerWg   sync.WaitGroup
 
 	repairStop chan struct{}
 	repairWg   sync.WaitGroup
@@ -431,7 +431,7 @@ func (d *DistributedCache) Close() error {
 	d.closeOnce.Do(func() {
 		d.closed.Store(true)
 		d.stopRepairWorker()
-		d.stopSeedWorker()
+		d.stopPeerWorker()
 		d.stopDiagnosticsWorker()
 		d.stopRetryWorker()
 		if d.control != nil {
@@ -479,7 +479,7 @@ func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error
 		retryCh:         make(chan retryTask, opts.ReplicationRetryQueueSize),
 		retryDelayCh:    make(chan scheduledRetryTask, opts.ReplicationRetryQueueSize),
 		retryStop:       make(chan struct{}),
-		seedStop:        make(chan struct{}),
+		peerStop:        make(chan struct{}),
 		repairStop:      make(chan struct{}),
 		diagnosticsStop: make(chan struct{}),
 		keys:            make(map[string]keyMeta),
@@ -514,7 +514,7 @@ func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error
 	svc.clientTLS = clientTLS
 	cl.SetPeerEventHandler(svc)
 	svc.startRetryWorker()
-	svc.startSeedWorker()
+	svc.startPeerWorker()
 	svc.startRepairWorker()
 	svc.startDiagnosticsWorker()
 
@@ -1524,33 +1524,33 @@ func (d *DistributedCache) stopRepairWorker() {
 	d.repairWg.Wait()
 }
 
-func (d *DistributedCache) startSeedWorker() {
-	if d.opts.SeedDNSName == "" && len(d.opts.SeedNodes) == 0 {
+func (d *DistributedCache) startPeerWorker() {
+	if d.opts.PeerDNSName == "" && len(d.opts.PeerNodes) == 0 {
 		return
 	}
-	d.joinConfiguredSeeds()
-	if d.opts.SeedRefreshInterval <= 0 {
+	d.joinConfiguredPeers()
+	if d.opts.PeerRefreshInterval <= 0 {
 		return
 	}
-	d.seedWg.Add(1)
+	d.peerWg.Add(1)
 	go func() {
-		defer d.seedWg.Done()
-		ticker := time.NewTicker(d.opts.SeedRefreshInterval)
+		defer d.peerWg.Done()
+		ticker := time.NewTicker(d.opts.PeerRefreshInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				d.joinConfiguredSeeds()
-			case <-d.seedStop:
+				d.joinConfiguredPeers()
+			case <-d.peerStop:
 				return
 			}
 		}
 	}()
 }
 
-func (d *DistributedCache) stopSeedWorker() {
-	close(d.seedStop)
-	d.seedWg.Wait()
+func (d *DistributedCache) stopPeerWorker() {
+	close(d.peerStop)
+	d.peerWg.Wait()
 }
 
 func (d *DistributedCache) startDiagnosticsWorker() {
@@ -1580,39 +1580,39 @@ func (d *DistributedCache) stopDiagnosticsWorker() {
 	d.diagnosticsWg.Wait()
 }
 
-func (d *DistributedCache) joinConfiguredSeeds() {
+func (d *DistributedCache) joinConfiguredPeers() {
 	if d.cluster == nil {
 		return
 	}
-	seeds := make([]string, 0, len(d.opts.SeedNodes)+4)
-	seeds = append(seeds, d.opts.SeedNodes...)
-	if d.opts.SeedDNSName != "" {
+	peers := make([]string, 0, len(d.opts.PeerNodes)+4)
+	peers = append(peers, d.opts.PeerNodes...)
+	if d.opts.PeerDNSName != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), d.opts.ControlTimeout)
-		dnsSeeds, err := d.resolveDNSSeeds(ctx)
+		dnsPeers, err := d.resolveDNSPeers(ctx)
 		cancel()
 		if err != nil {
-			d.logger.Warnf("failed to resolve DNS seed %s: %v", d.opts.SeedDNSName, err)
+			d.logger.Warnf("failed to resolve peer DNS %s: %v", d.opts.PeerDNSName, err)
 		} else {
-			seeds = append(seeds, dnsSeeds...)
+			peers = append(peers, dnsPeers...)
 		}
 	}
-	if len(seeds) == 0 {
+	if len(peers) == 0 {
 		return
 	}
-	if _, err := d.cluster.JoinSeeds(seeds); err != nil {
-		d.logger.Warnf("failed to join refreshed seeds: %v", err)
+	if _, err := d.cluster.JoinPeers(peers); err != nil {
+		d.logger.Warnf("failed to join refreshed peers: %v", err)
 	}
 }
 
-func (d *DistributedCache) resolveDNSSeeds(ctx context.Context) ([]string, error) {
-	port := d.opts.SeedDNSPort
+func (d *DistributedCache) resolveDNSPeers(ctx context.Context) ([]string, error) {
+	port := d.opts.PeerDNSPort
 	if port == 0 {
 		port = d.opts.GossipBindPort
 	}
 	if port == 0 {
-		return nil, fmt.Errorf("seed DNS port is required")
+		return nil, fmt.Errorf("peer DNS port is required")
 	}
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, d.opts.SeedDNSName)
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, d.opts.PeerDNSName)
 	if err != nil {
 		return nil, err
 	}
@@ -1893,9 +1893,9 @@ func configFromOptions(opts Options) (*config.Config, error) {
 	cfg.Common.Cache.Cluster.MemberList.BindPort = opts.GossipBindPort
 	cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = opts.AdvertiseAddr
 	cfg.Common.Cache.Cluster.MemberList.AdvertisePort = opts.AdvertisePort
-	cfg.Common.Cache.Cluster.MemberList.SeedNodes = opts.SeedNodes
-	cfg.Common.Cache.Cluster.MemberList.SeedDNSName = opts.SeedDNSName
-	cfg.Common.Cache.Cluster.MemberList.SeedDNSPort = opts.SeedDNSPort
+	cfg.Common.Cache.Cluster.MemberList.PeerNodes = opts.PeerNodes
+	cfg.Common.Cache.Cluster.MemberList.PeerDNSName = opts.PeerDNSName
+	cfg.Common.Cache.Cluster.MemberList.PeerDNSPort = opts.PeerDNSPort
 	cfg.Common.Cache.Cluster.MemberList.PartitionCount = opts.PartitionCount
 	cfg.Common.Cache.Cluster.MemberList.ReplicationFactor = opts.ReplicationFactor
 	cfg.Common.Cache.Control.BindAddr = opts.ControlBindAddr
@@ -1911,7 +1911,7 @@ func configFromOptions(opts Options) (*config.Config, error) {
 	cfg.Common.Cache.Repair.IntervalMs = int(opts.RepairInterval / time.Millisecond)
 	cfg.Common.Cache.Repair.MaxKeysPerCycle = opts.RepairMaxKeysPerCycle
 	cfg.Common.Cache.Churn.GracePeriodMs = int(opts.ChurnGracePeriod / time.Millisecond)
-	cfg.Common.Cache.Seeds.RefreshIntervalMs = int(opts.SeedRefreshInterval / time.Millisecond)
+	cfg.Common.Cache.Peers.RefreshIntervalMs = int(opts.PeerRefreshInterval / time.Millisecond)
 	cfg.Common.Cache.TombstoneTTL = int(opts.TombstoneTTL / time.Millisecond)
 	cfg.Common.Cache.Metrics.BindAddr = opts.MetricsBindAddr
 	cfg.Common.Cache.Metrics.BindPort = opts.MetricsBindPort
@@ -1953,9 +1953,9 @@ func optionsFromConfig(cfg *config.Config) Options {
 		GossipBindPort:              cfg.Common.Cache.Cluster.MemberList.BindPort,
 		AdvertiseAddr:               cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr,
 		AdvertisePort:               cfg.Common.Cache.Cluster.MemberList.AdvertisePort,
-		SeedNodes:                   cfg.Common.Cache.Cluster.MemberList.SeedNodes,
-		SeedDNSName:                 cfg.Common.Cache.Cluster.MemberList.SeedDNSName,
-		SeedDNSPort:                 cfg.Common.Cache.Cluster.MemberList.SeedDNSPort,
+		PeerNodes:                   cfg.Common.Cache.Cluster.MemberList.PeerNodes,
+		PeerDNSName:                 cfg.Common.Cache.Cluster.MemberList.PeerDNSName,
+		PeerDNSPort:                 cfg.Common.Cache.Cluster.MemberList.PeerDNSPort,
 		SharedKey:                   cfg.Common.Cache.SharedKey,
 		Namespace:                   cfg.Common.Cache.Namespace,
 		WriteConcern:                parseWriteConcern(cfg.Common.Cache.WriteConcern),
@@ -1968,7 +1968,7 @@ func optionsFromConfig(cfg *config.Config) Options {
 		RepairInterval:              time.Duration(cfg.Common.Cache.Repair.IntervalMs) * time.Millisecond,
 		RepairMaxKeysPerCycle:       cfg.Common.Cache.Repair.MaxKeysPerCycle,
 		ChurnGracePeriod:            time.Duration(cfg.Common.Cache.Churn.GracePeriodMs) * time.Millisecond,
-		SeedRefreshInterval:         time.Duration(cfg.Common.Cache.Seeds.RefreshIntervalMs) * time.Millisecond,
+		PeerRefreshInterval:         time.Duration(cfg.Common.Cache.Peers.RefreshIntervalMs) * time.Millisecond,
 		TombstoneTTL:                time.Duration(cfg.Common.Cache.TombstoneTTL) * time.Millisecond,
 		MetricsBindAddr:             cfg.Common.Cache.Metrics.BindAddr,
 		MetricsBindPort:             cfg.Common.Cache.Metrics.BindPort,
@@ -2008,8 +2008,8 @@ func validateConfig(cfg *config.Config, opts Options) error {
 	if opts.ReplicationRetryQueueSize < 0 {
 		return fmt.Errorf("replication_retry_queue_size must be >= 0")
 	}
-	if opts.SeedRefreshInterval < 0 {
-		return fmt.Errorf("seed_refresh_interval must be >= 0")
+	if opts.PeerRefreshInterval < 0 {
+		return fmt.Errorf("peer_refresh_interval must be >= 0")
 	}
 	if opts.SelfCheckTimeout < 0 {
 		return fmt.Errorf("self_check_timeout must be >= 0")
@@ -2020,8 +2020,8 @@ func validateConfig(cfg *config.Config, opts Options) error {
 	if opts.MinReadyPeers < 0 {
 		return fmt.Errorf("min_ready_peers must be >= 0")
 	}
-	if cfg.Common.Cache.Cluster.MemberList.SeedDNSName != "" && cfg.Common.Cache.Cluster.MemberList.SeedDNSPort < 0 {
-		return fmt.Errorf("seed_dns_port must be >= 0")
+	if cfg.Common.Cache.Cluster.MemberList.PeerDNSName != "" && cfg.Common.Cache.Cluster.MemberList.PeerDNSPort < 0 {
+		return fmt.Errorf("peer_dns_port must be >= 0")
 	}
 	if opts.RequireSharedKey && cfg.Common.Cache.SharedKey == "" {
 		return fmt.Errorf("diagnostics.require_shared_key enabled but common.cache.shared_key is empty; set common.cache.shared_key in a later config file such as -c config.yml -c config.secrets.yml, or set CACHE_SHARED_KEY")

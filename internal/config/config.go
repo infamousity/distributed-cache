@@ -62,9 +62,9 @@ type Config struct {
 					BindPort          int      `mapstructure:"bind_port"`               // gossip port, e.g. 8946
 					AdvertiseAddr     string   `mapstructure:"advertise_address"`       // optional; falls back to BindAddr
 					AdvertisePort     int      `mapstructure:"advertise_port"`          // usually same as BindPort
-					SeedNodes         []string `mapstructure:"seed_nodes"`              // gossip seed nodes: ["10.10.1.3:8946", ...]
-					SeedDNSName       string   `mapstructure:"seed_dns_name"`           // optional DNS name resolved into seed nodes
-					SeedDNSPort       int      `mapstructure:"seed_dns_port"`           // port used with seed_dns_name
+					PeerNodes         []string `mapstructure:"peer_nodes"`              // gossip peer addresses: ["10.10.1.3:8946", ...]
+					PeerDNSName       string   `mapstructure:"peer_dns_name"`           // optional DNS name resolved into peer addresses
+					PeerDNSPort       int      `mapstructure:"peer_dns_port"`           // port used with peer_dns_name
 					PartitionCount    int      `mapstructure:"partition_count"`         // max partitions in this memberlist (default: 271)
 					ReplicationFactor int      `mapstructure:"replication_factor"`      // number of replicas (default: 3)
 				} `mapstructure:"memberlist"`
@@ -94,9 +94,9 @@ type Config struct {
 			Churn struct {
 				GracePeriodMs int `mapstructure:"grace_period_ms"`
 			} `mapstructure:"churn"`
-			Seeds struct {
+			Peers struct {
 				RefreshIntervalMs int `mapstructure:"refresh_interval_ms"`
-			} `mapstructure:"seeds"`
+			} `mapstructure:"peers"`
 			Metrics struct {
 				BindAddr string `mapstructure:"bind_addr"`
 				BindPort int    `mapstructure:"bind_port"`
@@ -136,13 +136,13 @@ func internalBinds(v *viper.Viper) error {
 	if err := v.BindEnv("common.cache.cluster.memberlist.advertise_port", "CACHE_CLUSTER_MEMBERLIST_ADVERTISE_PORT", "CACHE_GOSSIP_ADVERTISE_PORT"); err != nil {
 		return err
 	}
-	if err := v.BindEnv("common.cache.cluster.memberlist.seed_nodes", "CACHE_CLUSTER_MEMBERLIST_SEED_NODES"); err != nil {
+	if err := v.BindEnv("common.cache.cluster.memberlist.peer_nodes", "CACHE_CLUSTER_MEMBERLIST_PEER_NODES"); err != nil {
 		return err
 	}
-	if err := v.BindEnv("common.cache.cluster.memberlist.seed_dns_name", "CACHE_CLUSTER_MEMBERLIST_SEED_DNS_NAME"); err != nil {
+	if err := v.BindEnv("common.cache.cluster.memberlist.peer_dns_name", "CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME"); err != nil {
 		return err
 	}
-	if err := v.BindEnv("common.cache.cluster.memberlist.seed_dns_port", "CACHE_CLUSTER_MEMBERLIST_SEED_DNS_PORT"); err != nil {
+	if err := v.BindEnv("common.cache.cluster.memberlist.peer_dns_port", "CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT"); err != nil {
 		return err
 	}
 	if err := v.BindEnv("common.cache.cluster.memberlist.partition_count", "CACHE_CLUSTER_MEMBERLIST_PARTITION_COUNT", "CACHE_PARTITION_COUNT"); err != nil {
@@ -196,7 +196,7 @@ func internalBinds(v *viper.Viper) error {
 	if err := v.BindEnv("common.cache.churn.grace_period_ms", "CACHE_CHURN_GRACE_PERIOD_MS"); err != nil {
 		return err
 	}
-	if err := v.BindEnv("common.cache.seeds.refresh_interval_ms", "CACHE_SEEDS_REFRESH_INTERVAL_MS"); err != nil {
+	if err := v.BindEnv("common.cache.peers.refresh_interval_ms", "CACHE_PEERS_REFRESH_INTERVAL_MS"); err != nil {
 		return err
 	}
 	if err := v.BindEnv("common.cache.metrics.bind_addr", "CACHE_METRICS_BIND_ADDR"); err != nil {
@@ -297,7 +297,7 @@ func Load(paths ...string) (*Config, error) {
 	base.SetDefault("common.cache.repair.interval_ms", 30000)
 	base.SetDefault("common.cache.repair.max_keys_per_cycle", 1000)
 	base.SetDefault("common.cache.churn.grace_period_ms", 30000)
-	base.SetDefault("common.cache.seeds.refresh_interval_ms", 30000)
+	base.SetDefault("common.cache.peers.refresh_interval_ms", 30000)
 	base.SetDefault("common.cache.write_concern", "one")
 	base.SetDefault("common.cache.tombstone_ttl_ms", 300000)
 	base.SetDefault("common.cache.diagnostics.self_check_timeout_ms", 1000)
@@ -392,6 +392,16 @@ func newRootTemplate(ipFunc func() (string, error)) *template.Template {
 			},
 			"ip": func() (string, error) {
 				return ipFunc()
+			},
+			"peerIP": func(peerDNSName string) (string, error) {
+				return peerIP(peerDNSName)
+			},
+			"peerAddr": func(peerDNSName string, port int) (string, error) {
+				ip, err := peerIP(peerDNSName)
+				if err != nil {
+					return "", err
+				}
+				return net.JoinHostPort(ip, fmt.Sprint(port)), nil
 			},
 		})
 }
@@ -733,6 +743,65 @@ func extractIP(addr net.Addr) net.IP {
 	default:
 		return nil
 	}
+}
+
+func peerIP(peerDNSName string) (string, error) {
+	if strings.TrimSpace(peerDNSName) == "" {
+		return "", errors.New("peer DNS name is required")
+	}
+	localIPs, err := localIPv4Networks()
+	if err != nil {
+		return "", err
+	}
+	return peerIPFrom(peerDNSName, localIPs, net.LookupIP)
+}
+
+func peerIPFrom(peerDNSName string, localIPs []*net.IPNet, lookupIP func(string) ([]net.IP, error)) (string, error) {
+	if strings.TrimSpace(peerDNSName) == "" {
+		return "", errors.New("peer DNS name is required")
+	}
+	if len(localIPs) == 0 {
+		return "", errors.New("no local IPv4 networks available")
+	}
+	peerIPs, err := lookupIP(peerDNSName)
+	if err != nil {
+		return "", err
+	}
+	for _, peerIP := range peerIPs {
+		peerIPv4 := peerIP.To4()
+		if peerIPv4 == nil {
+			continue
+		}
+		for _, local := range localIPs {
+			if local.Contains(peerIPv4) {
+				return local.IP.String(), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no local IPv4 address shares a subnet with peer DNS %q", peerDNSName)
+}
+
+func localIPv4Networks() ([]*net.IPNet, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*net.IPNet, 0, len(addrs))
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP.IsLoopback() {
+			continue
+		}
+		ip := ipNet.IP.To4()
+		if ip == nil {
+			continue
+		}
+		out = append(out, &net.IPNet{IP: ip, Mask: ipNet.Mask})
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no non-loopback local IPv4 networks found")
+	}
+	return out, nil
 }
 
 func RecursiveExpand(v string) (expanded string, err error) {

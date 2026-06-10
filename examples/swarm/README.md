@@ -6,7 +6,7 @@ The goal is to prove the generic runtime contracts used by the library:
 
 - each task has a unique node name
 - each task advertises a peer-reachable gossip/control address
-- peer discovery uses DNS seed refresh
+- peer discovery uses DNS peer refresh
 - peers verify each other through the gRPC control plane
 - reads continue through task churn
 
@@ -14,7 +14,7 @@ The core cache code does not depend on Docker Swarm. Swarm is just one runtime p
 
 The generic runtime contract is documented in the root `README.md`, with
 additional deployment notes in `docs/runtime-profiles.md`. This example only
-covers the Swarm-specific profile: `tasks.<service>` DNS seed discovery,
+covers the Swarm-specific profile: `tasks.<service>` DNS peer discovery,
 task-scoped node names, and an internal overlay network for memberlist gossip,
 gRPC control-plane traffic, and example-only harness probes.
 
@@ -200,8 +200,8 @@ CACHE_CONTROL_BIND_ADDR: "0.0.0.0"
 CACHE_CONTROL_BIND_PORT: 9090
 CACHE_GOSSIP_BIND_ADDR: "0.0.0.0"
 CACHE_GOSSIP_BIND_PORT: 8946
-CACHE_SEED_DNS_NAME: tasks.app
-CACHE_SEED_DNS_PORT: 8946
+CACHE_PEER_DNS_NAME: tasks.app
+CACHE_PEER_DNS_PORT: 8946
 CACHE_SHARED_KEY: dev-shared-key
 CACHE_TOMBSTONE_TTL_MS: 300000
 CACHE_VALUE_TTL_MS: 600000
@@ -211,7 +211,7 @@ CACHE_DIAGNOSTICS_MIN_READY_PEERS: 2
 Important details:
 
 - `tasks.app` is Swarm's task-level DNS name for the service named `app`.
-- The app chooses a container IP on the same subnet as `CACHE_SEED_DNS_NAME`
+- The app chooses a container IP on the same subnet as `CACHE_PEER_DNS_NAME`
   results for gossip and control-plane advertisement unless
   `CACHE_ADVERTISE_ADDR` or `CACHE_CONTROL_ADVERTISE_ADDR` is set. This matters
   when a task is attached to both the Swarm ingress network and the private
@@ -263,7 +263,7 @@ routing as well as local reads.
 
 This proves the example stack can:
 
-- discover peers through DNS seed refresh
+- discover peers through DNS peer refresh
 - verify peers through the control plane
 - replicate the example key
 - accept active set/get/delete harness commands through any service replica

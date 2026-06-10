@@ -22,10 +22,10 @@ func main() {
 	controlPort := getenvInt("CACHE_CONTROL_BIND_PORT", 9090)
 	gossipAddr := getenv("CACHE_GOSSIP_BIND_ADDR", "0.0.0.0")
 	gossipPort := getenvInt("CACHE_GOSSIP_BIND_PORT", 8946)
-	seedNodes := parseCSV(getenv("CACHE_SEED_NODES", ""))
-	seedDNSName := getenv("CACHE_SEED_DNS_NAME", "")
-	seedDNSPort := getenvInt("CACHE_SEED_DNS_PORT", gossipPort)
-	advertiseAddr := getenv("CACHE_ADVERTISE_ADDR", defaultAdvertiseAddr(seedDNSName))
+	peerNodes := parseCSV(getenv("CACHE_PEER_NODES", ""))
+	peerDNSName := getenv("CACHE_PEER_DNS_NAME", "")
+	peerDNSPort := getenvInt("CACHE_PEER_DNS_PORT", gossipPort)
+	advertiseAddr := getenv("CACHE_ADVERTISE_ADDR", defaultAdvertiseAddr(peerDNSName))
 	controlAdvertiseAddr := getenv("CACHE_CONTROL_ADVERTISE_ADDR", net.JoinHostPort(advertiseAddr, strconv.Itoa(controlPort)))
 	sharedKey := getenv("CACHE_SHARED_KEY", "dev-shared-key")
 	startupWait := time.Duration(getenvInt("CACHE_STARTUP_WAIT_MS", 5000)) * time.Millisecond
@@ -42,9 +42,9 @@ func main() {
 		GossipBindPort:       gossipPort,
 		AdvertiseAddr:        advertiseAddr,
 		AdvertisePort:        gossipPort,
-		SeedNodes:            seedNodes,
-		SeedDNSName:          seedDNSName,
-		SeedDNSPort:          seedDNSPort,
+		PeerNodes:            peerNodes,
+		PeerDNSName:          peerDNSName,
+		PeerDNSPort:          peerDNSPort,
 		SharedKey:            sharedKey,
 		ReplicationFactor:    3,
 		CacheSizeBytes:       64 << 20,
@@ -55,7 +55,7 @@ func main() {
 		log.Fatalf("start cache: %v", err)
 	}
 	defer dc.Close()
-	log.Printf("cache advertise gossip=%s:%d control=%s seed_dns=%s", advertiseAddr, gossipPort, controlAdvertiseAddr, seedDNSName)
+	log.Printf("cache advertise gossip=%s:%d control=%s peer_dns=%s", advertiseAddr, gossipPort, controlAdvertiseAddr, peerDNSName)
 
 	go serveHarnessHTTP(harnessHTTPAddr, nodeName, dc, valueTTL)
 
@@ -67,7 +67,7 @@ func main() {
 	for {
 		if isFirstReplica(nodeName) && !wrote {
 			if _, found, err := dc.Get(ctx, key); err != nil {
-				log.Printf("seed get error: %v", err)
+				log.Printf("initial get error: %v", err)
 			} else if found {
 				wrote = true
 			} else {
@@ -221,10 +221,10 @@ func parseCSV(v string) []string {
 	return out
 }
 
-func defaultAdvertiseAddr(seedDNSName string) string {
+func defaultAdvertiseAddr(peerDNSName string) string {
 	localIPs := localInterfaceIPs()
-	if seedDNSName != "" {
-		if ip := advertiseAddrForSeedNetwork(seedDNSName, localIPs); ip != "" {
+	if peerDNSName != "" {
+		if ip := advertiseAddrForPeerNetwork(peerDNSName, localIPs); ip != "" {
 			return ip
 		}
 	}
@@ -255,19 +255,19 @@ func localInterfaceIPs() []*net.IPNet {
 	return out
 }
 
-func advertiseAddrForSeedNetwork(seedDNSName string, localIPs []*net.IPNet) string {
-	seedIPs, err := net.LookupIP(seedDNSName)
+func advertiseAddrForPeerNetwork(peerDNSName string, localIPs []*net.IPNet) string {
+	peerIPs, err := net.LookupIP(peerDNSName)
 	if err != nil {
-		log.Printf("resolve seed DNS for advertise addr failed: %v", err)
+		log.Printf("resolve peer DNS for advertise addr failed: %v", err)
 		return ""
 	}
-	for _, seedIP := range seedIPs {
-		seedIPv4 := seedIP.To4()
-		if seedIPv4 == nil {
+	for _, peerIP := range peerIPs {
+		peerIPv4 := peerIP.To4()
+		if peerIPv4 == nil {
 			continue
 		}
 		for _, local := range localIPs {
-			if local.Contains(seedIPv4) {
+			if local.Contains(peerIPv4) {
 				return local.IP.String()
 			}
 		}

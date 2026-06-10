@@ -19,16 +19,16 @@ func main() {
 		controlPort = flag.Int("control-port", 9090, "control-plane bind port")
 		gossipAddr  = flag.String("gossip-addr", "127.0.0.1", "gossip bind address")
 		gossipPort  = flag.Int("gossip-port", 8946, "gossip bind port")
-		seedNodes   = flag.String("seeds", "", "comma-delimited seed nodes host:port")
+		peerNodes   = flag.String("peers", "", "comma-delimited peer addresses host:port")
 		writer      = flag.Bool("writer", false, "write the example value from this node")
 		startupWait = flag.Duration("startup-wait", 2*time.Second, "time to wait for gossip membership before writing")
 		readEvery   = flag.Duration("read-every", 5*time.Second, "read interval")
 	)
 	flag.Parse()
 
-	seeds := []string{}
-	if *seedNodes != "" {
-		seeds = strings.Split(*seedNodes, ",")
+	peers := []string{}
+	if *peerNodes != "" {
+		peers = strings.Split(*peerNodes, ",")
 	}
 
 	cache, err := dcache.Start(dcache.Options{
@@ -37,7 +37,7 @@ func main() {
 		ControlBindPort:   *controlPort,
 		GossipBindAddr:    *gossipAddr,
 		GossipBindPort:    *gossipPort,
-		SeedNodes:         seeds,
+		PeerNodes:         peers,
 		SharedKey:         "dev-shared-key",
 		ReplicationFactor: 2,
 		CacheSizeBytes:    64 << 20,

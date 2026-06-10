@@ -78,18 +78,18 @@ func NewCluster(cfg *config.Config) (*Cluster, error) {
 	if err != nil {
 		return nil, fmt.Errorf("memberlist.Create: %w", err)
 	}
-	l.Info("Memberlist created attempting to join seeds...")
-	if len(c.SeedNodes) > 0 {
+	l.Info("Memberlist created attempting to join peers...")
+	if len(c.PeerNodes) > 0 {
 		nodes := make([]string, 0)
-		for _, seed := range c.SeedNodes {
-			if !strings.HasPrefix(seed, c.NodeName) {
-				nodes = append(nodes, seed)
+		for _, peer := range c.PeerNodes {
+			if !strings.HasPrefix(peer, c.NodeName) {
+				nodes = append(nodes, peer)
 			}
 		}
 		if _, err = ml.Join(nodes); err != nil {
-			l.Warnf("failed to join seeds: %v", err)
+			l.Warnf("failed to join peers: %v", err)
 		} else {
-			l.Infof("joined seeds: %v", nodes)
+			l.Infof("joined peers: %v", nodes)
 		}
 	}
 
@@ -117,16 +117,16 @@ func (c *Cluster) GossipDiagnostics() GossipDiagnosticsSnapshot {
 	return c.diagnostics.Snapshot()
 }
 
-func (c *Cluster) JoinSeeds(seeds []string) (int, error) {
-	if c == nil || c.memberlist == nil || len(seeds) == 0 {
+func (c *Cluster) JoinPeers(peers []string) (int, error) {
+	if c == nil || c.memberlist == nil || len(peers) == 0 {
 		return 0, nil
 	}
-	nodes := make([]string, 0, len(seeds))
-	for _, seed := range seeds {
-		if seed == "" || strings.HasPrefix(seed, c.localName) {
+	nodes := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		if peer == "" || strings.HasPrefix(peer, c.localName) {
 			continue
 		}
-		nodes = append(nodes, seed)
+		nodes = append(nodes, peer)
 	}
 	if len(nodes) == 0 {
 		return 0, nil

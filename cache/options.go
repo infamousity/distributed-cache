@@ -22,10 +22,10 @@ type Options struct {
 	GossipBindPort              int
 	AdvertiseAddr               string
 	AdvertisePort               int
-	SeedNodes                   []string
-	SeedDNSName                 string
-	SeedDNSPort                 int
-	SeedRefreshInterval         time.Duration
+	PeerNodes                   []string
+	PeerDNSName                 string
+	PeerDNSPort                 int
+	PeerRefreshInterval         time.Duration
 	SharedKey                   string
 	PartitionCount              int
 	ReplicationFactor           int
@@ -86,8 +86,8 @@ func (o Options) withDefaults() Options {
 	if o.TombstoneTTL == 0 {
 		o.TombstoneTTL = 5 * time.Minute
 	}
-	if o.SeedRefreshInterval == 0 {
-		o.SeedRefreshInterval = 30 * time.Second
+	if o.PeerRefreshInterval == 0 {
+		o.PeerRefreshInterval = 30 * time.Second
 	}
 	if o.WriteConcern == 0 {
 		o.WriteConcern = WriteConcernOne

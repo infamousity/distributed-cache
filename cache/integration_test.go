@@ -373,52 +373,52 @@ func TestMetricsStartFailureIsReturned(t *testing.T) {
 	}
 }
 
-func TestResolveDNSSeedsHonorsContext(t *testing.T) {
+func TestResolveDNSPeersHonorsContext(t *testing.T) {
 	c := &DistributedCache{opts: Options{
-		SeedDNSName:    "localhost",
-		SeedDNSPort:    8946,
+		PeerDNSName:    "localhost",
+		PeerDNSPort:    8946,
 		GossipBindPort: 8946,
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := c.resolveDNSSeeds(ctx); err == nil {
+	if _, err := c.resolveDNSPeers(ctx); err == nil {
 		t.Fatalf("expected canceled DNS context to return an error")
 	}
 }
 
-func TestResolveDNSSeeds(t *testing.T) {
+func TestResolveDNSPeers(t *testing.T) {
 	c, err := Start(Options{
-		NodeName:            "node-dns-seeds",
+		NodeName:            "node-dns-peers",
 		ControlBindAddr:     "127.0.0.1",
 		ControlBindPort:     getFreePort(t),
 		GossipBindAddr:      "127.0.0.1",
 		GossipBindPort:      getFreePort(t),
 		SharedKey:           "test-key",
 		ReplicationFactor:   2,
-		SeedDNSName:         "localhost",
-		SeedDNSPort:         8946,
-		SeedRefreshInterval: time.Hour,
+		PeerDNSName:         "localhost",
+		PeerDNSPort:         8946,
+		PeerRefreshInterval: time.Hour,
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer c.Close()
 
-	seeds, err := c.resolveDNSSeeds(context.Background())
+	peers, err := c.resolveDNSPeers(context.Background())
 	if err != nil {
-		t.Fatalf("resolveDNSSeeds: %v", err)
+		t.Fatalf("resolveDNSPeers: %v", err)
 	}
-	if len(seeds) == 0 {
-		t.Fatalf("expected at least one localhost seed")
+	if len(peers) == 0 {
+		t.Fatalf("expected at least one localhost peer")
 	}
-	for _, seed := range seeds {
-		_, port, err := net.SplitHostPort(seed)
+	for _, peer := range peers {
+		_, port, err := net.SplitHostPort(peer)
 		if err != nil {
-			t.Fatalf("seed %q is not host:port: %v", seed, err)
+			t.Fatalf("peer %q is not host:port: %v", peer, err)
 		}
 		if port != "8946" {
-			t.Fatalf("seed %q used port %s, want 8946", seed, port)
+			t.Fatalf("peer %q used port %s, want 8946", peer, port)
 		}
 	}
 }
@@ -689,7 +689,7 @@ func TestDistributedCacheReplicationAndForwarding(t *testing.T) {
 	control1 := getFreePort(t)
 	control2 := getFreePort(t)
 
-	seed := fmt.Sprintf("127.0.0.1:%d", gossip1)
+	peer := fmt.Sprintf("127.0.0.1:%d", gossip1)
 
 	c1, err := Start(Options{
 		NodeName:          "node-1",
@@ -697,7 +697,7 @@ func TestDistributedCacheReplicationAndForwarding(t *testing.T) {
 		ControlBindPort:   control1,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip1,
-		SeedNodes:         []string{},
+		PeerNodes:         []string{},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 	})
@@ -712,7 +712,7 @@ func TestDistributedCacheReplicationAndForwarding(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{seed},
+		PeerNodes:         []string{peer},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 	})
@@ -761,7 +761,7 @@ func TestGetUsesLocalReplicaWhenOwnerControlPlaneFails(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
+		PeerNodes:         []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 	})
@@ -816,7 +816,7 @@ func TestMajoritySetFailureIsIndeterminateAndLocallyVisible(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
+		PeerNodes:         []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 		WriteConcern:      WriteConcernMajority,
@@ -869,7 +869,7 @@ func TestMajorityDelFailureIsIndeterminateAndLocallyVisible(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
+		PeerNodes:         []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 		WriteConcern:      WriteConcernMajority,
@@ -904,7 +904,7 @@ func TestForwardedMajoritySetFailureIsIndeterminate(t *testing.T) {
 	gossip2 := getFreePort(t)
 	control1 := getFreePort(t)
 	control2 := getFreePort(t)
-	seed := fmt.Sprintf("127.0.0.1:%d", gossip1)
+	peer := fmt.Sprintf("127.0.0.1:%d", gossip1)
 
 	c1, err := Start(Options{
 		NodeName:          "forwarded-majority-set-caller",
@@ -927,7 +927,7 @@ func TestForwardedMajoritySetFailureIsIndeterminate(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{seed},
+		PeerNodes:         []string{peer},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 		WriteConcern:      WriteConcernMajority,
@@ -957,7 +957,7 @@ func TestForwardedMajorityDelFailureIsIndeterminate(t *testing.T) {
 	gossip2 := getFreePort(t)
 	control1 := getFreePort(t)
 	control2 := getFreePort(t)
-	seed := fmt.Sprintf("127.0.0.1:%d", gossip1)
+	peer := fmt.Sprintf("127.0.0.1:%d", gossip1)
 
 	c1, err := Start(Options{
 		NodeName:          "forwarded-majority-del-caller",
@@ -980,7 +980,7 @@ func TestForwardedMajorityDelFailureIsIndeterminate(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{seed},
+		PeerNodes:         []string{peer},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 		WriteConcern:      WriteConcernMajority,
@@ -1090,7 +1090,7 @@ func TestForwardedPublicSetUsesOwnerAssignedVersion(t *testing.T) {
 	gossip2 := getFreePort(t)
 	control1 := getFreePort(t)
 	control2 := getFreePort(t)
-	seed := fmt.Sprintf("127.0.0.1:%d", gossip1)
+	peer := fmt.Sprintf("127.0.0.1:%d", gossip1)
 
 	c1, err := Start(Options{
 		NodeName:          "node-forward-set-1",
@@ -1112,7 +1112,7 @@ func TestForwardedPublicSetUsesOwnerAssignedVersion(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{seed},
+		PeerNodes:         []string{peer},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 	})
@@ -1151,7 +1151,7 @@ func TestForwardedPublicDelUsesOwnerAssignedVersion(t *testing.T) {
 	gossip2 := getFreePort(t)
 	control1 := getFreePort(t)
 	control2 := getFreePort(t)
-	seed := fmt.Sprintf("127.0.0.1:%d", gossip1)
+	peer := fmt.Sprintf("127.0.0.1:%d", gossip1)
 
 	c1, err := Start(Options{
 		NodeName:          "node-forward-del-1",
@@ -1173,7 +1173,7 @@ func TestForwardedPublicDelUsesOwnerAssignedVersion(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{seed},
+		PeerNodes:         []string{peer},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 	})
@@ -1225,7 +1225,7 @@ func TestLocalSetAdvancesBeyondObservedTombstoneVersion(t *testing.T) {
 	key := "observed-tombstone"
 	observed := testVersion(time.Now().Add(24*time.Hour).UnixMilli(), "future")
 	if err := c.deleteLocalVersioned(key, observed); err != nil {
-		t.Fatalf("seed tombstone: %v", err)
+		t.Fatalf("peer tombstone: %v", err)
 	}
 	resetVersionCounter(c)
 
@@ -1260,7 +1260,7 @@ func TestLocalDeleteAdvancesBeyondObservedValueVersion(t *testing.T) {
 	key := "observed-value"
 	observed := testVersion(time.Now().Add(24*time.Hour).UnixMilli(), "future")
 	if err := c.storeLocalVersioned(key, []byte("observed"), time.Minute, observed); err != nil {
-		t.Fatalf("seed value: %v", err)
+		t.Fatalf("peer value: %v", err)
 	}
 	resetVersionCounter(c)
 
@@ -1356,7 +1356,7 @@ func TestDistributedCacheReplicationStoresOnReplicas(t *testing.T) {
 	control1 := getFreePort(t)
 	control2 := getFreePort(t)
 
-	seed := fmt.Sprintf("127.0.0.1:%d", gossip1)
+	peer := fmt.Sprintf("127.0.0.1:%d", gossip1)
 
 	c1, err := Start(Options{
 		NodeName:          "node-1",
@@ -1364,7 +1364,7 @@ func TestDistributedCacheReplicationStoresOnReplicas(t *testing.T) {
 		ControlBindPort:   control1,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip1,
-		SeedNodes:         []string{},
+		PeerNodes:         []string{},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 	})
@@ -1379,7 +1379,7 @@ func TestDistributedCacheReplicationStoresOnReplicas(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{seed},
+		PeerNodes:         []string{peer},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 	})
@@ -1418,7 +1418,7 @@ func TestDistributedCacheDeleteReplicates(t *testing.T) {
 	control1 := getFreePort(t)
 	control2 := getFreePort(t)
 
-	seed := fmt.Sprintf("127.0.0.1:%d", gossip1)
+	peer := fmt.Sprintf("127.0.0.1:%d", gossip1)
 
 	c1, err := Start(Options{
 		NodeName:          "node-1",
@@ -1426,7 +1426,7 @@ func TestDistributedCacheDeleteReplicates(t *testing.T) {
 		ControlBindPort:   control1,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip1,
-		SeedNodes:         []string{},
+		PeerNodes:         []string{},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 	})
@@ -1441,7 +1441,7 @@ func TestDistributedCacheDeleteReplicates(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{seed},
+		PeerNodes:         []string{peer},
 		SharedKey:         "test-key",
 		ReplicationFactor: 2,
 	})
@@ -1480,7 +1480,7 @@ func TestSharedKeyAuthFailure(t *testing.T) {
 		ControlBindPort:   control1,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip1,
-		SeedNodes:         []string{},
+		PeerNodes:         []string{},
 		SharedKey:         "key-a",
 		ReplicationFactor: 2,
 	})
@@ -1512,7 +1512,7 @@ func TestMTLSHandshake(t *testing.T) {
 	control1 := getFreePort(t)
 	control2 := getFreePort(t)
 
-	seed := fmt.Sprintf("127.0.0.1:%d", gossip1)
+	peer := fmt.Sprintf("127.0.0.1:%d", gossip1)
 
 	tlsOpts := TLSOptions{
 		Enabled:           true,
@@ -1531,7 +1531,7 @@ func TestMTLSHandshake(t *testing.T) {
 		ControlBindPort:   control1,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip1,
-		SeedNodes:         []string{},
+		PeerNodes:         []string{},
 		SharedKey:         "mtls-key",
 		ReplicationFactor: 2,
 		TLS:               tlsOpts,
@@ -1547,7 +1547,7 @@ func TestMTLSHandshake(t *testing.T) {
 		ControlBindPort:   control2,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip2,
-		SeedNodes:         []string{seed},
+		PeerNodes:         []string{peer},
 		SharedKey:         "mtls-key",
 		ReplicationFactor: 2,
 		TLS:               tlsOpts,
@@ -1598,7 +1598,7 @@ func TestMTLSMissingClientCertFails(t *testing.T) {
 		ControlBindPort:   control1,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip1,
-		SeedNodes:         []string{},
+		PeerNodes:         []string{},
 		SharedKey:         "mtls-key",
 		ReplicationFactor: 2,
 		TLS:               tlsServer,
@@ -1647,7 +1647,7 @@ func TestMTLSWrongCAFails(t *testing.T) {
 		ControlBindPort:   control1,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    gossip1,
-		SeedNodes:         []string{},
+		PeerNodes:         []string{},
 		SharedKey:         "mtls-key",
 		ReplicationFactor: 2,
 		TLS:               tlsServer,

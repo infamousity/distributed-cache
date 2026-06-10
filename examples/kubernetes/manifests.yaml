@@ -81,9 +81,9 @@ spec:
               value: "$(POD_IP)"
             - name: CACHE_CLUSTER_MEMBERLIST_ADVERTISE_PORT
               value: "8946"
-            - name: CACHE_CLUSTER_MEMBERLIST_SEED_DNS_NAME
+            - name: CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME
               value: "cache-peers.default.svc.cluster.local"
-            - name: CACHE_CLUSTER_MEMBERLIST_SEED_DNS_PORT
+            - name: CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT
               value: "8946"
             - name: CACHE_API_BIND_ADDR
               value: "0.0.0.0"

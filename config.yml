@@ -16,10 +16,10 @@ common:
         bind_port: 8946
         advertise_addr: "{{ hostname }}"
         advertise_port: 8946
-        seed_dns_name: ""
-        seed_dns_port: 8946
+        peer_dns_name: ""
+        peer_dns_port: 8946
         replication_factor: 3
-    seeds:
+    peers:
       refresh_interval_ms: 30000
     churn:
       grace_period_ms: 30000

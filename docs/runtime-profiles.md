@@ -10,7 +10,7 @@ Each cache node needs:
 - a stable, unique `NodeName`
 - a peer-reachable memberlist gossip address and port
 - a peer-reachable gRPC control-plane `host:port`
-- at least one seed discovered through static `SeedNodes` or DNS seed refresh
+- at least one peer discovered through static `PeerNodes` or DNS peer refresh
 - private node-to-node network reachability for memberlist and gRPC traffic
 - the same `SharedKey` on every node
 
@@ -36,9 +36,9 @@ Swarm works well when each service task is also a cache node.
 Use:
 
 - `CACHE_CLUSTER_MEMBERLIST_NODE_NAME="{{.Task.Name}}"` for a unique node name
-- `CACHE_CLUSTER_MEMBERLIST_SEED_DNS_NAME=tasks.<service>` for task-level DNS
-  seed discovery
-- `CACHE_CLUSTER_MEMBERLIST_SEED_DNS_PORT=<gossip-port>`
+- `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME=tasks.<service>` for task-level DNS
+  peer discovery
+- `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT=<gossip-port>`
 - `CACHE_CLUSTER_MEMBERLIST_BIND_ADDRESS=0.0.0.0`
 - `CACHE_CLUSTER_MEMBERLIST_BIND_PORT=<gossip-port>`
 - `CACHE_API_BIND_ADDR=0.0.0.0`
@@ -58,8 +58,33 @@ Network expectations:
 - do not publish gossip or gRPC control-plane ports
 
 Swarm DNS note: `tasks.<service>` returns task IPs instead of the service VIP.
-That is the right seed shape for memberlist because peers must discover
+That is the right peer discovery shape because peers must discover
 individual cache nodes, not only the load-balanced service endpoint.
+
+When using config files, `peerIP` and `peerAddr` can derive advertise addresses
+from the same task-level DNS name:
+
+```yaml
+common:
+  cache:
+    api:
+      bind_addr: "0.0.0.0"
+      bind_port: 9090
+      advertise_addr: '{{ peerAddr "tasks.app" 9090 }}'
+    cluster:
+      memberlist:
+        node_name: '{{ env "HOSTNAME" }}'
+        bind_address: "0.0.0.0"
+        bind_port: 8946
+        advertise_addr: '{{ peerIP "tasks.app" }}'
+        advertise_port: 8946
+        peer_dns_name: "tasks.app"
+        peer_dns_port: 8946
+```
+
+`peerIP` selects this node's local IPv4 address on the same subnet as the
+resolved peer DNS records. This is safer than `ip` when a task is attached to
+multiple networks.
 
 ## Kubernetes
 
@@ -68,7 +93,7 @@ membership.
 
 Use:
 
-- a headless Service for seed DNS
+- a headless Service for peer DNS
 - StatefulSet pod names when stable identity matters
 - pod IPs or stable pod DNS names as advertised addresses
 - NetworkPolicy to allow cache node-to-node traffic and deny external access to
@@ -90,9 +115,9 @@ env:
     value: "0.0.0.0"
   - name: CACHE_API_BIND_PORT
     value: "9090"
-  - name: CACHE_CLUSTER_MEMBERLIST_SEED_DNS_NAME
+  - name: CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME
     value: "cache-peers.default.svc.cluster.local"
-  - name: CACHE_CLUSTER_MEMBERLIST_SEED_DNS_PORT
+  - name: CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT
     value: "8946"
   - name: CACHE_SHARED_KEY
     valueFrom:
@@ -128,14 +153,19 @@ It should not allow external ingress to gossip or gRPC control-plane ports.
 See `examples/kubernetes/` for an example headless Service, StatefulSet, Secret,
 and NetworkPolicy.
 
+Kubernetes usually has a simpler source of truth for the local pod IP via the
+Downward API, so prefer `status.podIP` for advertised addresses there. `peerIP`
+is still useful for config-file-driven runtimes where the local peer network
+must be inferred from DNS.
+
 ## Podman, Systemd, and VMs
 
-Static deployments work with explicit seeds or DNS records.
+Static deployments work with explicit peers or DNS records.
 
 Use:
 
 - `NodeName` set to a stable hostname or instance ID
-- `SeedNodes` with `host:port` entries, or a DNS name that resolves to peers
+- `PeerNodes` with `host:port` entries, or a DNS name that resolves to peers
 - `AdvertiseAddr` set to an address other cache nodes can reach
 - `ControlAdvertiseAddr` set to the peer-reachable gRPC `host:port`
 - host firewalls that allow cache traffic only between trusted nodes
@@ -157,7 +187,7 @@ common:
         bind_port: 8946
         advertise_addr: "cache-1.internal"
         advertise_port: 8946
-        seed_nodes:
+        peer_nodes:
           - "cache-1.internal:8946"
           - "cache-2.internal:8946"
           - "cache-3.internal:8946"
@@ -206,7 +236,7 @@ behavior:
 - `common.cache.metrics`: optional Prometheus export. Core diagnostics remain
   available through `Status()` even when metrics are disabled.
 
-Keep seed refresh, replication retry, read repair, churn grace, tombstone
+Keep peer refresh, replication retry, read repair, churn grace, tombstone
 retention, and memberlist gossip diagnostics enabled unless you have a specific
 reason to tune them. Those mechanisms are part of the cache's operational
 resilience.

@@ -16,7 +16,7 @@ func main() {
 		ControlBindPort:   9090,
 		GossipBindAddr:    "127.0.0.1",
 		GossipBindPort:    8946,
-		SeedNodes:         []string{},
+		PeerNodes:         []string{},
 		SharedKey:         "dev-shared-key",
 		ReplicationFactor: 2,
 		CacheSizeBytes:    64 << 20,
