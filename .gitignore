@@ -13,6 +13,7 @@
 !LICENSE
 !.release-please-manifest.json
 !config.yml
+!config.swarm.example.yml
 !docker-compose.yml
 !Dockerfile
 !release-please-config.json

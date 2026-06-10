@@ -1,0 +1,27 @@
+common:
+  cache:
+    log:
+      level: info
+    size_bytes: 1_073_741_824
+    api:
+      bind_addr: "0.0.0.0"
+      bind_port: 9090
+      advertise_addr: '{{ peerAddr "tasks.app" 9090 }}'
+    cluster:
+      tls:
+        enabled: false
+      memberlist:
+        node_name: '{{ env "HOSTNAME" }}'
+        bind_address: "0.0.0.0"
+        bind_port: 8946
+        advertise_addr: '{{ peerIP "tasks.app" }}'
+        advertise_port: 8946
+        peer_dns_name: "tasks.app"
+        peer_dns_port: 8946
+        replication_factor: 3
+    peers:
+      refresh_interval_ms: 30000
+    churn:
+      grace_period_ms: 30000
+    diagnostics:
+      min_ready_peers: 2

@@ -114,6 +114,11 @@ common:
     shared_key: "${CACHE_SHARED_KEY}"
 ```
 
+For Swarm-style overlay deployments, use `config.swarm.example.yml` as the
+starting profile and replace `tasks.app` with the actual Swarm service DNS name.
+It binds cache internals to `0.0.0.0` inside the container and derives
+peer-reachable advertise addresses with `peerIP` / `peerAddr`.
+
 Do not put production shared keys in the base config.
 
 ## Swarm

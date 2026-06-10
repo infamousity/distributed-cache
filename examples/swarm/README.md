@@ -211,6 +211,8 @@ CACHE_DIAGNOSTICS_MIN_READY_PEERS: 2
 Important details:
 
 - `tasks.app` is Swarm's task-level DNS name for the service named `app`.
+- `../../config.swarm.example.yml` shows the equivalent config-file profile
+  using `peerIP` and `peerAddr` for advertise addresses.
 - The app chooses a container IP on the same subnet as `CACHE_PEER_DNS_NAME`
   results for gossip and control-plane advertisement unless
   `CACHE_ADVERTISE_ADDR` or `CACHE_CONTROL_ADVERTISE_ADDR` is set. This matters

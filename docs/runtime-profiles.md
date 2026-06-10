@@ -62,7 +62,8 @@ That is the right peer discovery shape because peers must discover
 individual cache nodes, not only the load-balanced service endpoint.
 
 When using config files, `peerIP` and `peerAddr` can derive advertise addresses
-from the same task-level DNS name:
+from the same task-level DNS name. See `config.swarm.example.yml` for a complete
+example; replace `tasks.app` with the actual Swarm service DNS name.
 
 ```yaml
 common:
