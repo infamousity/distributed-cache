@@ -7,11 +7,14 @@
 !go.mod
 !README.md
 !docs/*.md
+!.github/workflows/*.yml
 !examples/kubernetes/*.yaml
 !examples/swarm/docker-stack.yml
 !LICENSE
+!.release-please-manifest.json
 !config.yml
 !docker-compose.yml
 !Dockerfile
+!release-please-config.json
 !examples/swarm/chaos.sh
 !*/
