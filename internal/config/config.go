@@ -381,6 +381,14 @@ func Load(paths ...string) (*Config, error) {
 }
 
 func newRootTemplate(ipFunc func() (string, error)) *template.Template {
+	return newRootTemplateWithResolvers(ipFunc, os.Getenv, peerIP)
+}
+
+func newRootTemplateWithResolvers(
+	ipFunc func() (string, error),
+	getenv func(string) string,
+	peerIPFunc func(string) (string, error),
+) *template.Template {
 	return template.New("").
 		Funcs(sprig.FuncMap()).
 		Funcs(template.FuncMap{
@@ -395,24 +403,24 @@ func newRootTemplate(ipFunc func() (string, error)) *template.Template {
 				return ipFunc()
 			},
 			"peerDNSName": func() (string, error) {
-				return peerDNSNameFromEnv(os.Getenv)
+				return peerDNSNameFromEnv(getenv)
 			},
 			"peerDnsName": func() (string, error) {
-				return peerDNSNameFromEnv(os.Getenv)
+				return peerDNSNameFromEnv(getenv)
 			},
 			"peerIP": func(args ...string) (string, error) {
-				peerDNSName, err := peerDNSNameArg(args)
+				peerDNSName, err := peerDNSNameArg(args, getenv)
 				if err != nil {
 					return "", err
 				}
-				return peerIP(peerDNSName)
+				return peerIPFunc(peerDNSName)
 			},
 			"peerAddr": func(args ...any) (string, error) {
-				peerDNSName, port, err := peerAddrArgs(args)
+				peerDNSName, port, err := peerAddrArgs(args, getenv)
 				if err != nil {
 					return "", err
 				}
-				ip, err := peerIP(peerDNSName)
+				ip, err := peerIPFunc(peerDNSName)
 				if err != nil {
 					return "", err
 				}
@@ -819,24 +827,24 @@ func localIPv4Networks() ([]*net.IPNet, error) {
 	return out, nil
 }
 
-func peerDNSNameArg(args []string) (string, error) {
+func peerDNSNameArg(args []string, getenv func(string) string) (string, error) {
 	if len(args) > 1 {
 		return "", fmt.Errorf("peerIP accepts zero or one peer DNS name argument")
 	}
 	if len(args) == 1 && strings.TrimSpace(args[0]) != "" {
 		return strings.TrimSpace(args[0]), nil
 	}
-	return peerDNSNameFromEnv(os.Getenv)
+	return peerDNSNameFromEnv(getenv)
 }
 
-func peerAddrArgs(args []any) (string, string, error) {
+func peerAddrArgs(args []any, getenv func(string) string) (string, string, error) {
 	switch len(args) {
 	case 1:
 		port, err := peerAddrPort(args[0])
 		if err != nil {
 			return "", "", err
 		}
-		peerDNSName, err := peerDNSNameFromEnv(os.Getenv)
+		peerDNSName, err := peerDNSNameFromEnv(getenv)
 		if err != nil {
 			return "", "", err
 		}

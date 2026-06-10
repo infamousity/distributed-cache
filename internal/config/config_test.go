@@ -5,6 +5,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -144,6 +146,72 @@ common:
 	}
 }
 
+func TestTemplateHelpersRenderPeerDNSIPAndAddr(t *testing.T) {
+	getenv := mapGetter(map[string]string{
+		"CACHE_RUNTIME":            "swarm",
+		"CACHE_SWARM_SERVICE_NAME": "cache",
+	})
+	root := newRootTemplateWithResolvers(
+		func() (string, error) { return "10.10.1.99", nil },
+		getenv,
+		func(peerDNSName string) (string, error) {
+			if peerDNSName != "tasks.cache" {
+				t.Fatalf("peer DNS name = %q", peerDNSName)
+			}
+			return "10.10.1.7", nil
+		},
+	)
+	hook := TemplateUnmarshallerHookFunc(root)
+
+	got, err := hook(reflect.TypeOf(""), reflect.TypeOf(""), `dns={{ peerDNSName }} ip={{ peerIP }} addr={{ peerAddr 9090 }}`)
+	if err != nil {
+		t.Fatalf("template hook: %v", err)
+	}
+	if got != "dns=tasks.cache ip=10.10.1.7 addr=10.10.1.7:9090" {
+		t.Fatalf("rendered template = %q", got)
+	}
+}
+
+func TestTemplateHelpersRenderExplicitPeerDNSArguments(t *testing.T) {
+	root := newRootTemplateWithResolvers(
+		func() (string, error) { return "10.10.1.99", nil },
+		mapGetter(map[string]string{}),
+		func(peerDNSName string) (string, error) {
+			if peerDNSName != "tasks.explicit" {
+				t.Fatalf("peer DNS name = %q", peerDNSName)
+			}
+			return "10.10.1.8", nil
+		},
+	)
+	hook := TemplateUnmarshallerHookFunc(root)
+
+	got, err := hook(reflect.TypeOf(""), reflect.TypeOf(""), `ip={{ peerIP "tasks.explicit" }} addr={{ peerAddr "tasks.explicit" "9091" }}`)
+	if err != nil {
+		t.Fatalf("template hook: %v", err)
+	}
+	if got != "ip=10.10.1.8 addr=10.10.1.8:9091" {
+		t.Fatalf("rendered template = %q", got)
+	}
+}
+
+func TestTemplateHookLeavesUnrenderedStringWhenPeerHelperFails(t *testing.T) {
+	root := newRootTemplateWithResolvers(
+		func() (string, error) { return "10.10.1.99", nil },
+		mapGetter(map[string]string{}),
+		func(string) (string, error) { return "", errors.New("should not be called") },
+	)
+	hook := TemplateUnmarshallerHookFunc(root)
+	input := `{{ peerIP }}`
+
+	got, err := hook(reflect.TypeOf(""), reflect.TypeOf(""), input)
+	if err != nil {
+		t.Fatalf("template hook: %v", err)
+	}
+	if got != input {
+		t.Fatalf("failed template rendered as %q, want original %q", got, input)
+	}
+}
+
 func TestPeerDNSNameFromEnvUsesExplicitPeerDNS(t *testing.T) {
 	getenv := mapGetter(map[string]string{
 		"CACHE_RUNTIME":                          "swarm",
@@ -175,10 +243,106 @@ func TestPeerDNSNameFromEnvDerivesSwarmTasksName(t *testing.T) {
 	}
 }
 
+func TestPeerDNSNameFromEnvAcceptsExistingTasksName(t *testing.T) {
+	getenv := mapGetter(map[string]string{
+		"CACHE_RUNTIME":            "swarm",
+		"CACHE_SWARM_SERVICE_NAME": "tasks.cache",
+	})
+
+	got, err := peerDNSNameFromEnv(getenv)
+	if err != nil {
+		t.Fatalf("peerDNSNameFromEnv: %v", err)
+	}
+	if got != "tasks.cache" {
+		t.Fatalf("peer DNS name = %q", got)
+	}
+}
+
 func TestPeerDNSNameFromEnvRequiresExplicitRuntimeContext(t *testing.T) {
 	_, err := peerDNSNameFromEnv(mapGetter(map[string]string{}))
 	if err == nil {
 		t.Fatalf("expected missing peer DNS name to fail")
+	}
+}
+
+func TestPeerDNSNameArg(t *testing.T) {
+	getenv := mapGetter(map[string]string{
+		"CACHE_RUNTIME":            "swarm",
+		"CACHE_SWARM_SERVICE_NAME": "cache",
+	})
+
+	got, err := peerDNSNameArg(nil, getenv)
+	if err != nil {
+		t.Fatalf("peerDNSNameArg no args: %v", err)
+	}
+	if got != "tasks.cache" {
+		t.Fatalf("peer DNS name = %q", got)
+	}
+
+	got, err = peerDNSNameArg([]string{" tasks.explicit "}, getenv)
+	if err != nil {
+		t.Fatalf("peerDNSNameArg explicit: %v", err)
+	}
+	if got != "tasks.explicit" {
+		t.Fatalf("peer DNS name = %q", got)
+	}
+
+	if _, err := peerDNSNameArg([]string{"one", "two"}, getenv); err == nil {
+		t.Fatalf("expected too many peerIP args to fail")
+	}
+}
+
+func TestPeerAddrArgs(t *testing.T) {
+	getenv := mapGetter(map[string]string{
+		"CACHE_RUNTIME":            "swarm",
+		"CACHE_SWARM_SERVICE_NAME": "cache",
+	})
+
+	peerDNSName, port, err := peerAddrArgs([]any{9090}, getenv)
+	if err != nil {
+		t.Fatalf("peerAddrArgs port only: %v", err)
+	}
+	if peerDNSName != "tasks.cache" || port != "9090" {
+		t.Fatalf("peerAddrArgs = (%q, %q)", peerDNSName, port)
+	}
+
+	peerDNSName, port, err = peerAddrArgs([]any{"tasks.explicit", "9091"}, getenv)
+	if err != nil {
+		t.Fatalf("peerAddrArgs explicit: %v", err)
+	}
+	if peerDNSName != "tasks.explicit" || port != "9091" {
+		t.Fatalf("peerAddrArgs = (%q, %q)", peerDNSName, port)
+	}
+
+	for name, args := range map[string][]any{
+		"no args":       {},
+		"bad dns":       {"", 9090},
+		"bad port type": {"tasks.explicit", struct{}{}},
+		"zero port":     {"tasks.explicit", 0},
+		"blank port":    {"tasks.explicit", " "},
+		"too many args": {"tasks.explicit", 9090, "extra"},
+	} {
+		if _, _, err := peerAddrArgs(args, getenv); err == nil {
+			t.Fatalf("expected %s to fail", name)
+		}
+	}
+}
+
+func TestSwarmExampleConfigDocumentsTemplateHelpers(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.swarm.example.yml"))
+	if err != nil {
+		t.Fatalf("read swarm config example: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"peerDNSName, peerIP, and peerAddr are config-template functions",
+		`advertise_addr: "{{ peerAddr 9090 }}"`,
+		`advertise_addr: "{{ peerIP }}"`,
+		`peer_dns_name: "{{ peerDNSName }}"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config.swarm.example.yml missing %q", want)
+		}
 	}
 }
 
