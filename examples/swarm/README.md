@@ -194,13 +194,14 @@ the gossip or gRPC control-plane ports externally.
 The stack uses:
 
 ```yaml
+CACHE_RUNTIME: swarm
+CACHE_SWARM_SERVICE_NAME: "{{.Service.Name}}"
 CACHE_NODE_NAME: "{{.Task.Name}}"
 CACHE_HARNESS_HTTP_BIND_ADDR: ":8080"
 CACHE_CONTROL_BIND_ADDR: "0.0.0.0"
 CACHE_CONTROL_BIND_PORT: 9090
 CACHE_GOSSIP_BIND_ADDR: "0.0.0.0"
 CACHE_GOSSIP_BIND_PORT: 8946
-CACHE_PEER_DNS_NAME: tasks.app
 CACHE_PEER_DNS_PORT: 8946
 CACHE_SHARED_KEY: dev-shared-key
 CACHE_TOMBSTONE_TTL_MS: 300000
@@ -210,9 +211,11 @@ CACHE_DIAGNOSTICS_MIN_READY_PEERS: 2
 
 Important details:
 
-- `tasks.app` is Swarm's task-level DNS name for the service named `app`.
+- The example derives Swarm task-level DNS from `CACHE_RUNTIME=swarm` and
+  `CACHE_SWARM_SERVICE_NAME`.
 - `../../config.swarm.example.yml` shows the equivalent config-file profile
-  using `peerIP` and `peerAddr` for advertise addresses.
+  using `peerDNSName`, `peerIP`, and `peerAddr` for peer discovery and
+  advertise addresses.
 - The app chooses a container IP on the same subnet as `CACHE_PEER_DNS_NAME`
   results for gossip and control-plane advertisement unless
   `CACHE_ADVERTISE_ADDR` or `CACHE_CONTROL_ADVERTISE_ADDR` is set. This matters

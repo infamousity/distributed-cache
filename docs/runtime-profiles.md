@@ -61,9 +61,10 @@ Swarm DNS note: `tasks.<service>` returns task IPs instead of the service VIP.
 That is the right peer discovery shape because peers must discover
 individual cache nodes, not only the load-balanced service endpoint.
 
-When using config files, `peerIP` and `peerAddr` can derive advertise addresses
-from the same task-level DNS name. See `config.swarm.example.yml` for a complete
-example; replace `tasks.app` with the actual Swarm service DNS name.
+When using config files, `peerDNSName` can fill `peer_dns_name` from explicit
+peer DNS env or from Swarm runtime metadata. `peerIP` and `peerAddr` then derive
+advertise addresses from that effective peer DNS name. See
+`config.swarm.example.yml` for a complete image-oriented profile.
 
 ```yaml
 common:
@@ -71,21 +72,23 @@ common:
     api:
       bind_addr: "0.0.0.0"
       bind_port: 9090
-      advertise_addr: '{{ peerAddr "tasks.app" 9090 }}'
+      advertise_addr: "{{ peerAddr 9090 }}"
     cluster:
       memberlist:
-        node_name: '{{ env "HOSTNAME" }}'
+        node_name: '{{ env "CACHE_CLUSTER_MEMBERLIST_NODE_NAME" }}'
         bind_address: "0.0.0.0"
         bind_port: 8946
-        advertise_addr: '{{ peerIP "tasks.app" }}'
+        advertise_addr: "{{ peerIP }}"
         advertise_port: 8946
-        peer_dns_name: "tasks.app"
+        peer_dns_name: "{{ peerDNSName }}"
         peer_dns_port: 8946
 ```
 
-`peerIP` selects this node's local IPv4 address on the same subnet as the
-resolved peer DNS records. This is safer than `ip` when a task is attached to
-multiple networks.
+`peerDNSName` prefers explicit `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME` or
+`CACHE_PEER_DNS_NAME`. With `CACHE_RUNTIME=swarm`, it can derive
+`tasks.<service>` from `CACHE_SWARM_SERVICE_NAME`. `peerIP` selects this node's
+local IPv4 address on the same subnet as the resolved peer DNS records. This is
+safer than `ip` when a task is attached to multiple networks.
 
 ## Kubernetes
 

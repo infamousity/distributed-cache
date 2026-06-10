@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -393,15 +394,29 @@ func newRootTemplate(ipFunc func() (string, error)) *template.Template {
 			"ip": func() (string, error) {
 				return ipFunc()
 			},
-			"peerIP": func(peerDNSName string) (string, error) {
+			"peerDNSName": func() (string, error) {
+				return peerDNSNameFromEnv(os.Getenv)
+			},
+			"peerDnsName": func() (string, error) {
+				return peerDNSNameFromEnv(os.Getenv)
+			},
+			"peerIP": func(args ...string) (string, error) {
+				peerDNSName, err := peerDNSNameArg(args)
+				if err != nil {
+					return "", err
+				}
 				return peerIP(peerDNSName)
 			},
-			"peerAddr": func(peerDNSName string, port int) (string, error) {
+			"peerAddr": func(args ...any) (string, error) {
+				peerDNSName, port, err := peerAddrArgs(args)
+				if err != nil {
+					return "", err
+				}
 				ip, err := peerIP(peerDNSName)
 				if err != nil {
 					return "", err
 				}
-				return net.JoinHostPort(ip, fmt.Sprint(port)), nil
+				return net.JoinHostPort(ip, port), nil
 			},
 		})
 }
@@ -802,6 +817,95 @@ func localIPv4Networks() ([]*net.IPNet, error) {
 		return nil, errors.New("no non-loopback local IPv4 networks found")
 	}
 	return out, nil
+}
+
+func peerDNSNameArg(args []string) (string, error) {
+	if len(args) > 1 {
+		return "", fmt.Errorf("peerIP accepts zero or one peer DNS name argument")
+	}
+	if len(args) == 1 && strings.TrimSpace(args[0]) != "" {
+		return strings.TrimSpace(args[0]), nil
+	}
+	return peerDNSNameFromEnv(os.Getenv)
+}
+
+func peerAddrArgs(args []any) (string, string, error) {
+	switch len(args) {
+	case 1:
+		port, err := peerAddrPort(args[0])
+		if err != nil {
+			return "", "", err
+		}
+		peerDNSName, err := peerDNSNameFromEnv(os.Getenv)
+		if err != nil {
+			return "", "", err
+		}
+		return peerDNSName, port, nil
+	case 2:
+		peerDNSName, ok := args[0].(string)
+		if !ok || strings.TrimSpace(peerDNSName) == "" {
+			return "", "", fmt.Errorf("peerAddr first argument must be a peer DNS name")
+		}
+		port, err := peerAddrPort(args[1])
+		if err != nil {
+			return "", "", err
+		}
+		return strings.TrimSpace(peerDNSName), port, nil
+	default:
+		return "", "", fmt.Errorf("peerAddr accepts either port or peer DNS name and port")
+	}
+}
+
+func peerAddrPort(v any) (string, error) {
+	switch port := v.(type) {
+	case int:
+		if port <= 0 {
+			return "", fmt.Errorf("peerAddr port must be > 0")
+		}
+		return strconv.Itoa(port), nil
+	case int64:
+		if port <= 0 {
+			return "", fmt.Errorf("peerAddr port must be > 0")
+		}
+		return strconv.FormatInt(port, 10), nil
+	case string:
+		port = strings.TrimSpace(port)
+		if port == "" {
+			return "", fmt.Errorf("peerAddr port is required")
+		}
+		return port, nil
+	default:
+		return "", fmt.Errorf("peerAddr port must be an integer or string")
+	}
+}
+
+func peerDNSNameFromEnv(getenv func(string) string) (string, error) {
+	for _, key := range []string{
+		"CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME",
+		"CACHE_PEER_DNS_NAME",
+	} {
+		if value := strings.TrimSpace(getenv(key)); value != "" {
+			return value, nil
+		}
+	}
+
+	if strings.EqualFold(strings.TrimSpace(getenv("CACHE_RUNTIME")), "swarm") {
+		for _, key := range []string{
+			"CACHE_SWARM_SERVICE_NAME",
+			"CACHE_SERVICE_NAME",
+			"SERVICE_NAME",
+		} {
+			if serviceName := strings.TrimSpace(getenv(key)); serviceName != "" {
+				if strings.HasPrefix(serviceName, "tasks.") {
+					return serviceName, nil
+				}
+				return "tasks." + serviceName, nil
+			}
+		}
+		return "", fmt.Errorf("CACHE_RUNTIME=swarm requires CACHE_SWARM_SERVICE_NAME or CACHE_PEER_DNS_NAME")
+	}
+
+	return "", fmt.Errorf("peer DNS name is required; set CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME, CACHE_PEER_DNS_NAME, or CACHE_RUNTIME=swarm with CACHE_SWARM_SERVICE_NAME")
 }
 
 func RecursiveExpand(v string) (expanded string, err error) {

@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -114,6 +116,75 @@ func TestPeerIPFromRejectsAmbiguousOrMissingInputs(t *testing.T) {
 		return []net.IP{net.ParseIP("192.168.1.12")}, nil
 	}); err == nil {
 		t.Fatalf("expected unmatched peer subnet to fail")
+	}
+}
+
+func TestLoadTemplateDerivesSwarmPeerDNSName(t *testing.T) {
+	t.Setenv("CACHE_CONFIG", "")
+	t.Setenv("CACHE_RUNTIME", "swarm")
+	t.Setenv("CACHE_SWARM_SERVICE_NAME", "cache")
+
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte(`
+common:
+  cache:
+    cluster:
+      memberlist:
+        peer_dns_name: "{{ peerDNSName }}"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Common.Cache.Cluster.MemberList.PeerDNSName; got != "tasks.cache" {
+		t.Fatalf("peer DNS name = %q", got)
+	}
+}
+
+func TestPeerDNSNameFromEnvUsesExplicitPeerDNS(t *testing.T) {
+	getenv := mapGetter(map[string]string{
+		"CACHE_RUNTIME":                          "swarm",
+		"CACHE_SWARM_SERVICE_NAME":               "cache",
+		"CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME": "tasks.explicit",
+	})
+
+	got, err := peerDNSNameFromEnv(getenv)
+	if err != nil {
+		t.Fatalf("peerDNSNameFromEnv: %v", err)
+	}
+	if got != "tasks.explicit" {
+		t.Fatalf("peer DNS name = %q", got)
+	}
+}
+
+func TestPeerDNSNameFromEnvDerivesSwarmTasksName(t *testing.T) {
+	getenv := mapGetter(map[string]string{
+		"CACHE_RUNTIME":            "swarm",
+		"CACHE_SWARM_SERVICE_NAME": "cache",
+	})
+
+	got, err := peerDNSNameFromEnv(getenv)
+	if err != nil {
+		t.Fatalf("peerDNSNameFromEnv: %v", err)
+	}
+	if got != "tasks.cache" {
+		t.Fatalf("peer DNS name = %q", got)
+	}
+}
+
+func TestPeerDNSNameFromEnvRequiresExplicitRuntimeContext(t *testing.T) {
+	_, err := peerDNSNameFromEnv(mapGetter(map[string]string{}))
+	if err == nil {
+		t.Fatalf("expected missing peer DNS name to fail")
+	}
+}
+
+func mapGetter(values map[string]string) func(string) string {
+	return func(key string) string {
+		return values[key]
 	}
 }
 

@@ -23,8 +23,8 @@ func main() {
 	gossipAddr := getenv("CACHE_GOSSIP_BIND_ADDR", "0.0.0.0")
 	gossipPort := getenvInt("CACHE_GOSSIP_BIND_PORT", 8946)
 	peerNodes := parseCSV(getenv("CACHE_PEER_NODES", ""))
-	peerDNSName := getenv("CACHE_PEER_DNS_NAME", "")
-	peerDNSPort := getenvInt("CACHE_PEER_DNS_PORT", gossipPort)
+	peerDNSName := getenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME", getenv("CACHE_PEER_DNS_NAME", defaultPeerDNSName()))
+	peerDNSPort := getenvInt("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT", getenvInt("CACHE_PEER_DNS_PORT", gossipPort))
 	advertiseAddr := getenv("CACHE_ADVERTISE_ADDR", defaultAdvertiseAddr(peerDNSName))
 	controlAdvertiseAddr := getenv("CACHE_CONTROL_ADVERTISE_ADDR", net.JoinHostPort(advertiseAddr, strconv.Itoa(controlPort)))
 	sharedKey := getenv("CACHE_SHARED_KEY", "dev-shared-key")
@@ -219,6 +219,20 @@ func parseCSV(v string) []string {
 		}
 	}
 	return out
+}
+
+func defaultPeerDNSName() string {
+	if !strings.EqualFold(getenv("CACHE_RUNTIME", ""), "swarm") {
+		return ""
+	}
+	serviceName := getenv("CACHE_SWARM_SERVICE_NAME", getenv("CACHE_SERVICE_NAME", getenv("SERVICE_NAME", "")))
+	if serviceName == "" {
+		return ""
+	}
+	if strings.HasPrefix(serviceName, "tasks.") {
+		return serviceName
+	}
+	return "tasks." + serviceName
 }
 
 func defaultAdvertiseAddr(peerDNSName string) string {
