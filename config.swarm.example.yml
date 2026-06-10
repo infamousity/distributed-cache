@@ -1,3 +1,10 @@
+# peerDNSName, peerIP, and peerAddr are config-template functions evaluated by
+# the repository config loader. They are not YAML fields, env vars, or
+# cache.Options members.
+# - peerDNSName resolves explicit peer DNS env or derives tasks.<service> from
+#   CACHE_RUNTIME=swarm and CACHE_SWARM_SERVICE_NAME.
+# - peerIP selects this task's local IPv4 address on the peer DNS subnet.
+# - peerAddr returns that IP as host:port.
 common:
   cache:
     log:

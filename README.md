@@ -287,9 +287,10 @@ TLS is optional and configured in `common.cache.cluster.tls`. To enable mutual T
 - The config `common.cache.api` section now defines the **control-plane** bind address/port.
 - `common.cache.api.advertise_addr` may be set to the peer-reachable `host:port` for the control plane. This is separate from memberlist gossip advertisement and is useful in runtimes where bind and peer-reachable addresses differ.
 - `common.cache.cluster.memberlist.peer_dns_name` plus `peer_dns_port` enables generic DNS peer discovery with periodic refresh; static `peer_nodes` still works.
-- Config templates support `peerDNSName`, `peerIP`, and `peerAddr` helpers for
-  peer discovery and advertise addresses. `peerIP` and `peerAddr` can also take
-  an explicit DNS name, such as `peerIP "tasks.app"` or
+- `peerDNSName`, `peerIP`, and `peerAddr` are config-template functions
+  evaluated by the repository config loader before YAML is decoded. They are not
+  env vars, YAML fields, or `cache.Options` members. `peerIP` and `peerAddr` can
+  also take an explicit DNS name, such as `peerIP "tasks.app"` or
   `peerAddr "tasks.app" 9090`.
 - `common.cache.churn.grace_period_ms` delays only ownership-loss cleanup during membership churn. Explicit deletes still write tombstones immediately.
 - The library cache data-plane is always in-process; the library does not expose

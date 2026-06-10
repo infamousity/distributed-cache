@@ -61,10 +61,13 @@ Swarm DNS note: `tasks.<service>` returns task IPs instead of the service VIP.
 That is the right peer discovery shape because peers must discover
 individual cache nodes, not only the load-balanced service endpoint.
 
-When using config files, `peerDNSName` can fill `peer_dns_name` from explicit
-peer DNS env or from Swarm runtime metadata. `peerIP` and `peerAddr` then derive
-advertise addresses from that effective peer DNS name. See
-`config.swarm.example.yml` for a complete image-oriented profile.
+When using config files, `peerDNSName`, `peerIP`, and `peerAddr` are
+config-template functions evaluated by the repository config loader before YAML
+is decoded. They are not env vars, YAML fields, or `cache.Options` members.
+`peerDNSName` can fill `peer_dns_name` from explicit peer DNS env or from Swarm
+runtime metadata. `peerIP` and `peerAddr` then derive advertise addresses from
+that effective peer DNS name. See `config.swarm.example.yml` for a complete
+image-oriented profile.
 
 ```yaml
 common:
