@@ -1,0 +1,83 @@
+name: feature prerelease
+
+on:
+  push:
+    branches:
+      - feature/**
+
+permissions:
+  contents: write
+
+jobs:
+  prerelease:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - run: go test ./...
+      - run: go vet ./...
+
+      - name: Create Go prerelease tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          branch="${GITHUB_REF_NAME}"
+          name="${branch#feature/}"
+
+          if [[ "${name}" == "${branch}" || -z "${name}" ]]; then
+            echo "Feature prerelease branches must be under feature/*" >&2
+            exit 1
+          fi
+
+          if [[ ! "${name}" =~ ^[0-9A-Za-z][0-9A-Za-z-]*(\.[0-9A-Za-z][0-9A-Za-z-]*)*$ ]]; then
+            cat >&2 <<EOF
+          Invalid feature branch name: ${branch}
+
+          The part after feature/ must already be a valid SemVer prerelease identifier:
+            - use only letters, digits, hyphens, and dots
+            - each dot-separated segment must be non-empty
+            - each segment must start with a letter or digit
+
+          Examples:
+            feature/authz-cache
+            feature/authz-cache.2
+            feature/sidecar-distributed-cache
+          EOF
+            exit 1
+          fi
+
+          IFS=. read -ra identifiers <<< "${name}"
+          for identifier in "${identifiers[@]}"; do
+            if [[ "${identifier}" =~ ^[0-9]+$ && "${#identifier}" -gt 1 && "${identifier}" == 0* ]]; then
+              echo "Invalid feature branch name: numeric prerelease identifier ${identifier@Q} must not contain leading zeroes" >&2
+              exit 1
+            fi
+          done
+
+          latest="$(
+            git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -n1
+          )"
+          latest="${latest:-v0.0.0}"
+
+          version="${latest#v}"
+          IFS=. read -r major minor patch <<< "${version}"
+          next="v${major}.${minor}.$((patch + 1))"
+
+          stamp="$(date -u +%Y%m%d%H%M%S)"
+          sha="$(git rev-parse --short=12 HEAD)"
+          tag="${next}-${name}.${stamp}.${sha}"
+
+          git tag -a "${tag}" -m "${tag}"
+          git push origin "${tag}"
+
+          echo "Created ${tag}"
