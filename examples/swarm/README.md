@@ -178,10 +178,10 @@ compares before/after diagnostics from the same reported cache node.
 This example embeds the cache inside the app service. The library cache API is
 Go/in-process only.
 
-The published HTTP routes in this example are harness endpoints. They let the
+The HTTP routes in this example are internal harness endpoints. They let the
 proof script drive writes, reads, deletes, and phase markers through Swarm
-service DNS from inside the private example overlay. They are not part of the
-cache library API.
+service DNS from inside the private example overlay. They are not published by
+the stack and are not part of the cache library API.
 
 Production services may expose cache-backed routes if that is part of their
 service contract. Those routes belong to the host service and must use the
@@ -240,8 +240,8 @@ Important details:
 ## Harness HTTP
 
 The app exposes its example-only harness HTTP surface on port `8080` inside the
-private `cache_control` overlay. The default proof harness reaches that surface
-from the internal `harness` service:
+private `cache_control` overlay. The stack does not publish this port. The
+default proof harness reaches that surface from the internal `harness` service:
 
 ```bash
 DOCKER_CONTEXT=default HARNESS_TRANSPORT=service ./chaos.sh

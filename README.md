@@ -130,25 +130,34 @@ Do not put production shared keys in the base config.
 
 ## Swarm
 
-Build and push any images before using `docker stack deploy`; Swarm does not build images from `build:` directives.
+Build and push any images before using `docker stack deploy`; Swarm does not
+build images from `build:` directives.
 
-Example standalone cache-node stack for control-plane/cluster testing:
+The maintained Swarm example lives in `examples/swarm`. It runs an app service
+where each replica embeds the cache, plus an internal harness service used only
+by the proof script:
 
 ```bash
-docker stack deploy -c docker-compose.swarm.yml cache
+cd examples/swarm
+DOCKER_CONTEXT=default ./chaos.sh
 ```
 
-Example app stack using the in-process cache module:
+For manual deployment:
 
 ```bash
-docker stack deploy -c docker-stack.swarm.yml app
+docker --context default build -t distributed-cache-example-app:latest -f examples/swarm/app/Dockerfile .
+docker --context default stack deploy -c examples/swarm/docker-stack.yml example
 ```
 
 Notes:
 - `cache_control` is an internal, encrypted overlay network to isolate control-plane traffic.
 - In application stacks, each app replica embeds the cache and uses `tasks.<service>` for gossip peer discovery.
 - The library cache API is in-process; any HTTP/JSON/GraphQL/etc. route that uses the cache is owned by the host service.
+- The Swarm example does not publish the app harness port by default. The proof script runs probes from an internal harness service on the same overlay.
 - The gRPC control plane is only for node-to-node coordination. Do not publish gossip or control-plane ports externally.
+
+See [examples/swarm](examples/swarm) for the current stack, proof harness, and
+runtime notes.
 
 ## API Boundary
 
