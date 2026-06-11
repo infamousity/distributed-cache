@@ -128,6 +128,19 @@ a later override:
 
 Do not put production shared keys in the base config.
 
+## Versions
+
+Stable releases use root Go module tags and can be referenced directly from Go
+projects:
+
+```bash
+go get github.com/infamousity/distributed-cache@v0.1.1
+```
+
+Feature branches may also publish Go-friendly prerelease tags for integration
+testing before merge. See [CONTRIBUTING.md](CONTRIBUTING.md) for the release
+and prerelease workflow.
+
 ## Swarm
 
 Build and push any images before using `docker stack deploy`; Swarm does not

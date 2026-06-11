@@ -6,6 +6,8 @@
 !go.sum
 !go.mod
 !README.md
+!CONTRIBUTING.md
+!CHANGELOG.md
 !docs/*.md
 !.github/workflows/*.yml
 !examples/kubernetes/*.yaml
