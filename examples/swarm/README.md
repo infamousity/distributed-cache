@@ -20,7 +20,7 @@ gRPC control-plane traffic, and example-only harness probes.
 
 ## Files
 
-- `docker-stack.yml`: example Swarm stack with three app/cache replicas.
+- `docker-stack.yml`: example Swarm stack with three app/cache replicas and one internal harness replica.
 - `app/main.go`: sample app embedding the cache and logging reads/writes.
 - Harness HTTP endpoints exposed by the sample app: `/mark`, `/set`, `/get`, `/del`, `/status`.
 - `app/Dockerfile`: image build for the sample app.
@@ -103,6 +103,8 @@ The script does the following:
 - builds the example image
 - deploys the `example` stack
 - waits for three running `example_app` tasks
+- executes harness HTTP requests from the internal `example_harness` service on
+  the same private overlay
 - marks each proof phase through the example harness HTTP surface
 - waits for the phase marker value to become readable through the harness HTTP
   surface
@@ -127,6 +129,7 @@ STACK_NAME=dcache ./chaos.sh
 STACK_FILE=/path/to/docker-stack.yml ./chaos.sh
 STACK_SERVICE_NAME=web ./chaos.sh
 SERVICE_NAME=dcache_web ./chaos.sh
+HARNESS_SERVICE_NAME=dcache_harness ./chaos.sh
 PRINT_CONFIG=1 ./chaos.sh
 REPLICAS=5 ./chaos.sh
 WAIT_SECONDS=180 ./chaos.sh
@@ -135,7 +138,7 @@ DEBUG_LOG_LINES=200 ./chaos.sh
 CLEANUP=1 ./chaos.sh
 IMAGE=registry.example.com/distributed-cache-example-app:latest ./chaos.sh
 PLACEMENT_CONSTRAINT='node.hostname == swarm-node-1' ./chaos.sh
-HARNESS_URL=http://127.0.0.1:18080 ./chaos.sh
+HARNESS_TRANSPORT=service ./chaos.sh
 GOSSIP_DEGRADATION_MODE=fail ./chaos.sh
 ```
 
@@ -149,19 +152,18 @@ defaults to `app`, so the Swarm service defaults to
 `${STACK_NAME}_${STACK_SERVICE_NAME}`. Set `SERVICE_NAME` only when you need to
 target a full precomputed Swarm service name.
 `PRINT_CONFIG=1` prints the resolved Docker context, stack file, stack name,
-stack service name, full Swarm service name, and image without building or
-deploying anything.
+stack service name, full Swarm service name, harness service name, harness
+transport, internal harness URL, and image without building or deploying
+anything.
 `STEADY_SECONDS` controls the quiet period before the final steady-state gossip
 check.
-If `HARNESS_URL` is not set, the script finds a running task node and calls the
-host-published harness port for that node. The default transport is
-`HARNESS_TRANSPORT=host`, which curls the node address from the machine running
-the script. Use `HARNESS_TRANSPORT=ssh` when the Docker manager can SSH to Swarm
-nodes and the node-local host port is reachable. Use
-`HARNESS_TRANSPORT=ssh-exec` when host-published ports are not reachable; it SSHes
-to the task node and runs curl inside the already-running app container. The
-stack publishes the harness with `mode: host`, not Swarm ingress, so the app
-task does not join the ingress overlay.
+If `HARNESS_URL` is not set, the default `HARNESS_TRANSPORT=service` executes
+curl inside the stack's internal harness service and calls
+`HARNESS_INTERNAL_URL`, which defaults to `http://${SERVICE_NAME}:8080`. This
+keeps harness traffic on the private `cache_control` overlay and avoids
+publishing host ports from an internal network. Use `HARNESS_TRANSPORT=host`,
+`ssh`, or `ssh-exec` only as explicit debug fallbacks when you intentionally
+publish and expose the app harness HTTP port outside the overlay.
 `GOSSIP_DEGRADATION_MODE` accepts `off`, `warn`, or `fail`; the default is
 `warn`. This check is separate from active cache correctness. It compares
 `Status().Gossip.DegradedTotal` before and after each proof phase. Gossip
@@ -219,12 +221,10 @@ Important details:
 - The app chooses a container IP on the same subnet as `CACHE_PEER_DNS_NAME`
   results for gossip and control-plane advertisement unless
   `CACHE_ADVERTISE_ADDR` or `CACHE_CONTROL_ADVERTISE_ADDR` is set. This matters
-  when a task is attached to both the Swarm ingress network and the private
-  cache-control overlay.
-- The `cache_control` network is internal and encrypted.
+  when a task is attached to more than one network.
 - The `cache_control` network is internal, encrypted, and not attachable. The
-  proof harness uses the app's host-published harness port instead of creating
-  one-shot containers on the overlay.
+  proof harness runs as a Swarm service on that overlay instead of creating
+  one-shot containers or publishing host ports.
 - Memberlist gossip uses the configured gossip port for TCP and UDP traffic
   between tasks.
 - The gRPC control plane uses the configured control-plane TCP port for
@@ -239,24 +239,28 @@ Important details:
 
 ## Harness HTTP
 
-The stack publishes the example harness HTTP surface on host port `18080` with
-host-mode publishing:
+The app exposes its example-only harness HTTP surface on port `8080` inside the
+private `cache_control` overlay. The default proof harness reaches that surface
+from the internal `harness` service:
 
 ```bash
-curl -fsS 'http://<task-node-address>:18080/status'
-curl -fsS -X POST 'http://<task-node-address>:18080/mark?phase=manual'
+DOCKER_CONTEXT=default HARNESS_TRANSPORT=service ./chaos.sh
 ```
 
-For environments where node host ports are reachable only from the node itself,
-the proof harness can execute curl over SSH:
+For ad hoc debugging, execute a request from the harness service container:
 
 ```bash
+docker --context default exec <harness-container> \
+  curl -fsS 'http://example_app:8080/status'
+```
+
+The app does not publish the harness HTTP port by default. If you intentionally
+add a published port for debugging, the proof script still supports the older
+host-oriented transports:
+
+```bash
+DOCKER_CONTEXT=default HARNESS_TRANSPORT=host ./chaos.sh
 DOCKER_CONTEXT=default HARNESS_TRANSPORT=ssh ./chaos.sh
-```
-
-If host-published ports are unavailable, execute curl inside the app container:
-
-```bash
 DOCKER_CONTEXT=default HARNESS_TRANSPORT=ssh-exec ./chaos.sh
 ```
 

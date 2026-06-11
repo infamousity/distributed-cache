@@ -34,6 +34,9 @@ if [[ "${STACK_FILE}" != /* ]]; then
 fi
 STACK_SERVICE_NAME="${STACK_SERVICE_NAME:-app}"
 SERVICE_NAME="${SERVICE_NAME:-${STACK_NAME}_${STACK_SERVICE_NAME}}"
+HARNESS_STACK_SERVICE_NAME="${HARNESS_STACK_SERVICE_NAME:-harness}"
+HARNESS_SERVICE_NAME="${HARNESS_SERVICE_NAME:-${STACK_NAME}_${HARNESS_STACK_SERVICE_NAME}}"
+HARNESS_INTERNAL_URL="${HARNESS_INTERNAL_URL:-http://${SERVICE_NAME}:8080}"
 IMAGE="${IMAGE:-distributed-cache-example-app:latest}"
 REPLICAS="${REPLICAS:-3}"
 WAIT_SECONDS="${WAIT_SECONDS:-120}"
@@ -41,7 +44,7 @@ STEADY_SECONDS="${STEADY_SECONDS:-15}"
 DEBUG_LOG_LINES="${DEBUG_LOG_LINES:-80}"
 PLACEMENT_CONSTRAINT="${PLACEMENT_CONSTRAINT:-node.platform.os == linux}"
 HARNESS_URL="${HARNESS_URL:-${APP_URL:-}}"
-HARNESS_TRANSPORT="${HARNESS_TRANSPORT:-host}"
+HARNESS_TRANSPORT="${HARNESS_TRANSPORT:-service}"
 HARNESS_HOST_PORT="${HARNESS_HOST_PORT:-18080}"
 GOSSIP_DEGRADATION_MODE="${GOSSIP_DEGRADATION_MODE:-warn}"
 PRINT_CONFIG="${PRINT_CONFIG:-0}"
@@ -77,7 +80,7 @@ require_swarm() {
 	if [[ "${HARNESS_TRANSPORT}" == "host" || -n "${HARNESS_URL}" ]] && ! command -v curl >/dev/null 2>&1; then
 		fail "curl is required for harness HTTP assertions"
 	fi
-	if [[ "${HARNESS_TRANSPORT}" == "ssh" || "${HARNESS_TRANSPORT}" == "ssh-exec" ]] && ! command -v ssh >/dev/null 2>&1; then
+	if [[ "${HARNESS_TRANSPORT}" == "service" || "${HARNESS_TRANSPORT}" == "ssh" || "${HARNESS_TRANSPORT}" == "ssh-exec" ]] && ! command -v ssh >/dev/null 2>&1; then
 		fail "ssh is required when HARNESS_TRANSPORT=${HARNESS_TRANSPORT}"
 	fi
 	local state
@@ -119,6 +122,15 @@ harness_request() {
 		return 1
 	fi
 	case "${HARNESS_TRANSPORT}" in
+		service)
+			local harness_node
+			harness_node="$(running_harness_node)"
+			if [[ -z "${harness_node}" ]]; then
+				return 1
+			fi
+			exec_in_harness_on_node "${harness_node}" \
+				curl -fsS --connect-timeout 2 --max-time 10 -X "${method}" "${HARNESS_INTERNAL_URL}${path}"
+			;;
 		host)
 			local addr
 			addr="$(docker_cmd node inspect "${node}" --format '{{.Status.Addr}}')"
@@ -139,18 +151,18 @@ harness_request() {
 			fi
 			ssh -o BatchMode=yes -o ConnectTimeout=5 "${node}" \
 				"task=$(shell_quote "${task}") method=$(shell_quote "${method}") url=$(shell_quote "http://127.0.0.1:8080${path}") sh -s" <<'EOF'
-container="$(docker ps --filter "label=com.docker.swarm.task.name=${task}" --format '{{.ID}}' | head -n1)"
+container="$(docker --context default ps --filter "label=com.docker.swarm.task.name=${task}" --format '{{.ID}}' | head -n1)"
 if [ -z "${container}" ]; then
-	container="$(docker ps --filter "name=${task}." --format '{{.ID}}' | head -n1)"
+	container="$(docker --context default ps --filter "name=${task}." --format '{{.ID}}' | head -n1)"
 fi
 if [ -z "${container}" ]; then
 	exit 1
 fi
-docker exec "${container}" curl -fsS --connect-timeout 2 --max-time 10 -X "${method}" "${url}"
+docker --context default exec "${container}" curl -fsS --connect-timeout 2 --max-time 10 -X "${method}" "${url}"
 EOF
 			;;
 		*)
-			fail "invalid HARNESS_TRANSPORT=${HARNESS_TRANSPORT}; use host, ssh, or ssh-exec"
+			fail "invalid HARNESS_TRANSPORT=${HARNESS_TRANSPORT}; use service, host, ssh, or ssh-exec"
 			;;
 	esac
 }
@@ -172,6 +184,39 @@ running_task_name_for_node() {
 		--filter desired-state=running \
 		--format '{{.Name}} {{.Node}} {{.CurrentState}}' \
 		| awk -v node="${node}" '$2 == node && $3 == "Running" { print $1; exit }'
+}
+
+running_harness_node() {
+	docker_cmd service ps "${HARNESS_SERVICE_NAME}" \
+		--filter desired-state=running \
+		--format '{{.Node}} {{.CurrentState}}' \
+		| awk '$2 == "Running" { print $1; exit }'
+}
+
+running_harness_task_name_for_node() {
+	local node="$1"
+	docker_cmd service ps "${HARNESS_SERVICE_NAME}" \
+		--filter desired-state=running \
+		--format '{{.Name}} {{.Node}} {{.CurrentState}}' \
+		| awk -v node="${node}" '$2 == node && $3 == "Running" { print $1; exit }'
+}
+
+exec_in_harness_on_node() {
+	local node="$1"
+	shift 1
+	local context_node
+	context_node="$(docker_cmd info --format '{{.Name}}' 2>/dev/null || true)"
+	if [[ "${node}" == "${context_node}" ]]; then
+		local container
+		container="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${HARNESS_SERVICE_NAME}" --format '{{.ID}}' | head -n1)"
+		if [[ -z "${container}" ]]; then
+			return 1
+		fi
+		docker_cmd exec "${container}" "$@"
+		return
+	fi
+	ssh -o BatchMode=yes -o ConnectTimeout=5 "${node}" \
+		"container=\$(docker --context default ps --filter \"label=com.docker.swarm.service.name=$(printf '%q' "${HARNESS_SERVICE_NAME}")\" --format '{{.ID}}' | head -n1); [ -n \"\${container}\" ] || exit 1; docker --context default exec \"\${container}\" $(printf '%q ' "$@")"
 }
 
 mark_phase() {
@@ -505,6 +550,10 @@ main() {
 		printf 'STACK_FILE=%s\n' "${STACK_FILE}"
 		printf 'STACK_SERVICE_NAME=%s\n' "${STACK_SERVICE_NAME}"
 		printf 'SERVICE_NAME=%s\n' "${SERVICE_NAME}"
+		printf 'HARNESS_STACK_SERVICE_NAME=%s\n' "${HARNESS_STACK_SERVICE_NAME}"
+		printf 'HARNESS_SERVICE_NAME=%s\n' "${HARNESS_SERVICE_NAME}"
+		printf 'HARNESS_TRANSPORT=%s\n' "${HARNESS_TRANSPORT}"
+		printf 'HARNESS_INTERNAL_URL=%s\n' "${HARNESS_INTERNAL_URL}"
 		printf 'IMAGE=%s\n' "${IMAGE}"
 		return
 	fi
