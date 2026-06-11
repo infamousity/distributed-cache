@@ -330,9 +330,12 @@ func (d *DistributedCache) Set(ctx context.Context, key string, value []byte, tt
 		return fmt.Errorf("no nodes in ring")
 	}
 	if owner != d.cluster.GetNode().GetSelf() {
-		addr, ok := d.cluster.GetNode().GetForwardAddr(owner)
-		if !ok {
-			return fmt.Errorf("owner address not found")
+		addr, err := d.validatedOwnerAddr(ctx, owner)
+		if err != nil {
+			if d.metrics != nil {
+				d.metrics.ForwardErrorTotal.Inc()
+			}
+			return err
 		}
 		if d.metrics != nil {
 			d.metrics.ForwardTotal.Inc()
@@ -385,9 +388,12 @@ func (d *DistributedCache) Del(ctx context.Context, key string, opts ...DelOptio
 		return fmt.Errorf("no nodes in ring")
 	}
 	if owner != d.cluster.GetNode().GetSelf() {
-		addr, ok := d.cluster.GetNode().GetForwardAddr(owner)
-		if !ok {
-			return fmt.Errorf("owner address not found")
+		addr, err := d.validatedOwnerAddr(ctx, owner)
+		if err != nil {
+			if d.metrics != nil {
+				d.metrics.ForwardErrorTotal.Inc()
+			}
+			return err
 		}
 		if d.metrics != nil {
 			d.metrics.ForwardTotal.Inc()
@@ -1082,6 +1088,10 @@ func (d *DistributedCache) setPeerState(name, addr string, state PeerState, last
 	}
 	now := time.Now()
 	d.peerMu.Lock()
+	if existing, ok := d.peers[name]; ok && existing.State == PeerStateLeft && (state == PeerStateUnreachable || state == PeerStateIdentityMismatch) {
+		d.peerMu.Unlock()
+		return
+	}
 	d.peers[name] = PeerStatus{
 		Name:        name,
 		ControlAddr: addr,
@@ -1091,6 +1101,33 @@ func (d *DistributedCache) setPeerState(name, addr string, state PeerState, last
 	}
 	d.peerMu.Unlock()
 	d.updatePeerMetrics()
+}
+
+func (d *DistributedCache) validatedOwnerAddr(ctx context.Context, owner string) (string, error) {
+	addr, ok := d.cluster.GetNode().GetForwardAddr(owner)
+	if !ok || addr == "" {
+		return "", fmt.Errorf("%w: owner %s address not found", ErrNotReady, owner)
+	}
+	client, err := d.clientFor(addr)
+	if err != nil {
+		d.handlePeerError(addr, "owner-validate", err)
+		return "", fmt.Errorf("%w: owner %s unavailable: %v", ErrNotReady, owner, err)
+	}
+	pingCtx, cancel := d.withTimeout(ctx)
+	defer cancel()
+	got, err := client.Ping(pingCtx)
+	if err != nil {
+		d.setPeerState(owner, addr, PeerStateUnreachable, err.Error())
+		d.handlePeerError(addr, "owner-validate", err)
+		return "", fmt.Errorf("%w: owner %s unavailable: %v", ErrNotReady, owner, err)
+	}
+	if got != owner {
+		d.evictClient(addr)
+		d.setPeerState(owner, addr, PeerStateIdentityMismatch, fmt.Sprintf("ping returned %s", got))
+		return "", fmt.Errorf("%w: owner %s identity mismatch: ping returned %s", ErrNotReady, owner, got)
+	}
+	d.setPeerState(owner, addr, PeerStateVerified, "")
+	return addr, nil
 }
 
 func (d *DistributedCache) updatePeerMetrics() {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -102,7 +103,7 @@ func serveHarnessHTTP(addr, nodeName string, dc *dcache.DistributedCache, valueT
 		}
 		value := []byte("phase-" + phase + "-from-" + nodeName)
 		if err := dc.Set(r.Context(), "swarm-key", value, valueTTL); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			writeCacheError(w, err)
 			return
 		}
 		fmt.Printf("node=%s chaos_phase=%s\n", nodeName, phase)
@@ -118,7 +119,7 @@ func serveHarnessHTTP(addr, nodeName string, dc *dcache.DistributedCache, valueT
 		}
 		ttl := time.Duration(getQueryInt(r, "ttl_ms", 600000)) * time.Millisecond
 		if err := dc.Set(r.Context(), key, []byte(value), ttl); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			writeCacheError(w, err)
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true, "node": nodeName})
@@ -130,7 +131,7 @@ func serveHarnessHTTP(addr, nodeName string, dc *dcache.DistributedCache, valueT
 			return
 		}
 		if err := dc.Del(r.Context(), key); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			writeCacheError(w, err)
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true, "node": nodeName})
@@ -143,7 +144,7 @@ func serveHarnessHTTP(addr, nodeName string, dc *dcache.DistributedCache, valueT
 		}
 		value, found, err := dc.Get(r.Context(), key)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			writeCacheError(w, err)
 			return
 		}
 		writeJSON(w, map[string]any{
@@ -160,6 +161,14 @@ func serveHarnessHTTP(addr, nodeName string, dc *dcache.DistributedCache, valueT
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Printf("harness http server error: %v", err)
 	}
+}
+
+func writeCacheError(w http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	if errors.Is(err, dcache.ErrNotReady) || errors.Is(err, dcache.ErrWriteIndeterminate) {
+		status = http.StatusServiceUnavailable
+	}
+	http.Error(w, err.Error(), status)
 }
 
 func getQueryInt(r *http.Request, key string, def int) int {

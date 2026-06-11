@@ -481,6 +481,56 @@ func keyOwnedByOtherNode(t *testing.T, c *DistributedCache) string {
 	return ""
 }
 
+func TestForwardedSetReturnsNotReadyForUnverifiedOwner(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "set-forwarder",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	c.cluster.GetNode().Add("stale-owner", "127.0.0.1:1")
+	c.setPeerState("stale-owner", "127.0.0.1:1", PeerStateLeft, "")
+	key := keyOwnedByOtherNode(t, c)
+
+	err = c.Set(context.Background(), key, []byte("value"), time.Minute)
+	if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("Set error = %v, want ErrNotReady", err)
+	}
+}
+
+func TestForwardedDelReturnsNotReadyForUnverifiedOwner(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "del-forwarder",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	c.cluster.GetNode().Add("stale-owner", "127.0.0.1:1")
+	c.setPeerState("stale-owner", "127.0.0.1:1", PeerStateLeft, "")
+	key := keyOwnedByOtherNode(t, c)
+
+	err = c.Del(context.Background(), key)
+	if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("Del error = %v, want ErrNotReady", err)
+	}
+}
+
 func poisonVersionCounter(c *DistributedCache) version.Version {
 	future := testVersion(time.Now().Add(24*time.Hour).UnixMilli(), "future")
 	c.versionMu.Lock()
