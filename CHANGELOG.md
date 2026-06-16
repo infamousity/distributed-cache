@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/infamousity/distributed-cache/compare/v0.1.2...v0.1.3) (2026-06-16)
+
+
+### Bug Fixes
+
+* **cache:** trigger bounded repair on peer verification ([3b5f130](https://github.com/infamousity/distributed-cache/commit/3b5f130dd18a92a1641259b8e87c2d5bfa8c20c6))
+
 ## [0.1.2](https://github.com/infamousity/distributed-cache/compare/v0.1.1...v0.1.2) (2026-06-16)
 
 
