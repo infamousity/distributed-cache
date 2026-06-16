@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/infamousity/distributed-cache/compare/v0.1.1...v0.1.2) (2026-06-16)
+
+
+### Features
+
+* support multiple peer DNS names ([9fb6845](https://github.com/infamousity/distributed-cache/commit/9fb68453af56b67df2c59301eea80887228db32e))
+
 ## [0.1.1](https://github.com/infamousity/distributed-cache/compare/v0.1.0...v0.1.1) (2026-06-11)
 
 
