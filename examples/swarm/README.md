@@ -16,7 +16,9 @@ The generic runtime contract is documented in the root `README.md`, with
 additional deployment notes in `docs/runtime-profiles.md`. This example only
 covers the Swarm-specific profile: `tasks.<service>` DNS peer discovery,
 task-scoped node names, and an internal overlay network for memberlist gossip,
-gRPC control-plane traffic, and example-only harness probes.
+gRPC control-plane traffic, and example-only harness probes. For peers spread
+across multiple connected stacks, set `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES`
+to a comma-separated list of `tasks.<service>` names.
 
 ## Files
 

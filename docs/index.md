@@ -154,7 +154,8 @@ DOCKER_CONTEXT=default ./chaos.sh
 
 Key points:
 
-- use `tasks.<service>` for peer discovery
+- use `tasks.<service>` for peer discovery, or `peer_dns_names` when peers span
+  multiple connected stacks or services
 - bind gossip and control-plane listeners inside an internal overlay
 - allow both TCP and UDP gossip traffic between tasks
 - allow TCP gRPC control-plane traffic between tasks

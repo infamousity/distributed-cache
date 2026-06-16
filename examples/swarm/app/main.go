@@ -25,6 +25,7 @@ func main() {
 	gossipPort := getenvInt("CACHE_GOSSIP_BIND_PORT", 8946)
 	peerNodes := parseCSV(getenv("CACHE_PEER_NODES", ""))
 	peerDNSName := getenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME", getenv("CACHE_PEER_DNS_NAME", defaultPeerDNSName()))
+	peerDNSNames := parseCSV(getenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES", getenv("CACHE_PEER_DNS_NAMES", "")))
 	peerDNSPort := getenvInt("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT", getenvInt("CACHE_PEER_DNS_PORT", gossipPort))
 	advertiseAddr := getenv("CACHE_ADVERTISE_ADDR", defaultAdvertiseAddr(peerDNSName))
 	controlAdvertiseAddr := getenv("CACHE_CONTROL_ADVERTISE_ADDR", net.JoinHostPort(advertiseAddr, strconv.Itoa(controlPort)))
@@ -45,6 +46,7 @@ func main() {
 		AdvertisePort:        gossipPort,
 		PeerNodes:            peerNodes,
 		PeerDNSName:          peerDNSName,
+		PeerDNSNames:         peerDNSNames,
 		PeerDNSPort:          peerDNSPort,
 		SharedKey:            sharedKey,
 		ReplicationFactor:    3,
@@ -56,7 +58,7 @@ func main() {
 		log.Fatalf("start cache: %v", err)
 	}
 	defer dc.Close()
-	log.Printf("cache advertise gossip=%s:%d control=%s peer_dns=%s", advertiseAddr, gossipPort, controlAdvertiseAddr, peerDNSName)
+	log.Printf("cache advertise gossip=%s:%d control=%s peer_dns=%s peer_dns_names=%v", advertiseAddr, gossipPort, controlAdvertiseAddr, peerDNSName, peerDNSNames)
 
 	go serveHarnessHTTP(harnessHTTPAddr, nodeName, dc, valueTTL)
 

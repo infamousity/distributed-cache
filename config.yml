@@ -17,6 +17,7 @@ common:
         advertise_addr: "{{ hostname }}"
         advertise_port: 8946
         peer_dns_name: ""
+        peer_dns_names: []
         peer_dns_port: 8946
         replication_factor: 3
     peers:

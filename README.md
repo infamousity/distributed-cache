@@ -117,7 +117,9 @@ common:
 For Swarm-style overlay deployments, use `config.swarm.example.yml` as the
 starting profile. It binds cache internals to `0.0.0.0`, derives `peer_dns_name`
 from explicit peer DNS env or Swarm runtime metadata, and derives peer-reachable
-advertise addresses with `peerIP` / `peerAddr`.
+advertise addresses with `peerIP` / `peerAddr`. Use `peer_dns_names` or
+`CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES` when discovery must span multiple
+connected stacks.
 
 For images that bake both configs, run the cache node with the Swarm profile as
 a later override:
@@ -207,9 +209,11 @@ node-to-node control-plane RPC layer used for fetch/store/delete/ping.
 Runtime-specific notes:
 
 - **Docker Swarm:** use `tasks.<service>` as the DNS peer name for task-level
-  discovery. Put gossip and gRPC control-plane traffic on an internal overlay
-  network. If the overlay is multi-host, allow both TCP and UDP on the gossip
-  port and TCP on the control-plane port between tasks.
+  discovery. If peers span multiple connected stacks, use `peer_dns_names` /
+  `PeerDNSNames` with each stack's `tasks.<service>` name. Put gossip and gRPC
+  control-plane traffic on an internal overlay network. If the overlay is
+  multi-host, allow both TCP and UDP on the gossip port and TCP on the
+  control-plane port between tasks.
 - **Kubernetes:** prefer a headless Service for DNS peer discovery and set
   advertised addresses to pod-reachable IPs or stable DNS names. NetworkPolicy
   should allow TCP/UDP gossip between pods and TCP gRPC control-plane traffic
@@ -308,7 +312,7 @@ TLS is optional and configured in `common.cache.cluster.tls`. To enable mutual T
 
 - The config `common.cache.api` section now defines the **control-plane** bind address/port.
 - `common.cache.api.advertise_addr` may be set to the peer-reachable `host:port` for the control plane. This is separate from memberlist gossip advertisement and is useful in runtimes where bind and peer-reachable addresses differ.
-- `common.cache.cluster.memberlist.peer_dns_name` plus `peer_dns_port` enables generic DNS peer discovery with periodic refresh; static `peer_nodes` still works.
+- `common.cache.cluster.memberlist.peer_dns_name` plus `peer_dns_port` enables generic DNS peer discovery with periodic refresh; `peer_dns_names` accepts multiple DNS names for multi-stack or multi-service discovery. Static `peer_nodes` still works.
 - `peerDNSName`, `peerIP`, and `peerAddr` are config-template functions
   evaluated by the repository config loader before YAML is decoded. They are not
   env vars, YAML fields, or `cache.Options` members. `peerIP` and `peerAddr` can

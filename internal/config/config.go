@@ -65,7 +65,8 @@ type Config struct {
 					AdvertisePort     int      `mapstructure:"advertise_port"`          // usually same as BindPort
 					PeerNodes         []string `mapstructure:"peer_nodes"`              // gossip peer addresses: ["10.10.1.3:8946", ...]
 					PeerDNSName       string   `mapstructure:"peer_dns_name"`           // optional DNS name resolved into peer addresses
-					PeerDNSPort       int      `mapstructure:"peer_dns_port"`           // port used with peer_dns_name
+					PeerDNSNames      []string `mapstructure:"peer_dns_names"`          // optional DNS names resolved into peer addresses
+					PeerDNSPort       int      `mapstructure:"peer_dns_port"`           // port used with peer_dns_name(s)
 					PartitionCount    int      `mapstructure:"partition_count"`         // max partitions in this memberlist (default: 271)
 					ReplicationFactor int      `mapstructure:"replication_factor"`      // number of replicas (default: 3)
 				} `mapstructure:"memberlist"`
@@ -141,6 +142,9 @@ func internalBinds(v *viper.Viper) error {
 		return err
 	}
 	if err := v.BindEnv("common.cache.cluster.memberlist.peer_dns_name", "CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.peer_dns_names", "CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES"); err != nil {
 		return err
 	}
 	if err := v.BindEnv("common.cache.cluster.memberlist.peer_dns_port", "CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT"); err != nil {

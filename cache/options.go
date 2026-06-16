@@ -24,6 +24,7 @@ type Options struct {
 	AdvertisePort               int
 	PeerNodes                   []string
 	PeerDNSName                 string
+	PeerDNSNames                []string
 	PeerDNSPort                 int
 	PeerRefreshInterval         time.Duration
 	SharedKey                   string

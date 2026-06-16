@@ -2,7 +2,8 @@
 # the repository config loader. They are not YAML fields, env vars, or
 # cache.Options members.
 # - peerDNSName resolves explicit peer DNS env or derives tasks.<service> from
-#   CACHE_RUNTIME=swarm and CACHE_SWARM_SERVICE_NAME.
+#   CACHE_RUNTIME=swarm and CACHE_SWARM_SERVICE_NAME. For multi-stack peer
+#   discovery, set peer_dns_names to a list of tasks.<service> names.
 # - peerIP selects this task's local IPv4 address on the peer DNS subnet.
 # - peerAddr returns that IP as host:port.
 common:
@@ -24,6 +25,7 @@ common:
         advertise_addr: "{{ peerIP }}"
         advertise_port: 8946
         peer_dns_name: "{{ peerDNSName }}"
+        peer_dns_names: []
         peer_dns_port: 8946
         replication_factor: 3
     peers:

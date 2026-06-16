@@ -423,6 +423,39 @@ func TestResolveDNSPeers(t *testing.T) {
 	}
 }
 
+func TestResolveDNSPeersUsesSingularAndPluralNames(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:            "node-dns-peer-names",
+		ControlBindAddr:     "127.0.0.1",
+		ControlBindPort:     getFreePort(t),
+		GossipBindAddr:      "127.0.0.1",
+		GossipBindPort:      getFreePort(t),
+		SharedKey:           "test-key",
+		ReplicationFactor:   2,
+		PeerDNSName:         "localhost",
+		PeerDNSNames:        []string{"localhost", " localhost "},
+		PeerDNSPort:         8946,
+		PeerRefreshInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	names := c.peerDNSNames()
+	if len(names) != 1 || names[0] != "localhost" {
+		t.Fatalf("peer DNS names = %#v, want only localhost", names)
+	}
+
+	peers, err := c.resolveDNSPeers(context.Background())
+	if err != nil {
+		t.Fatalf("resolveDNSPeers: %v", err)
+	}
+	if len(peers) == 0 {
+		t.Fatalf("expected at least one localhost peer")
+	}
+}
+
 func TestOwnershipCleanupChurnGrace(t *testing.T) {
 	c, err := Start(Options{
 		NodeName:          "node-churn",

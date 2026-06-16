@@ -20,6 +20,7 @@ func TestLoadBindsCacheEnvOnlyDeploymentFields(t *testing.T) {
 	t.Setenv("CACHE_CLUSTER_MEMBERLIST_ADVERTISE_PORT", "18946")
 	t.Setenv("CACHE_CLUSTER_MEMBERLIST_PEER_NODES", "cache-1:8946,cache-2:8946")
 	t.Setenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME", "tasks.cache")
+	t.Setenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES", "tasks.auth,tasks.user")
 	t.Setenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT", "8946")
 	t.Setenv("CACHE_CLUSTER_MEMBERLIST_PARTITION_COUNT", "509")
 	t.Setenv("CACHE_REPLICATION_FACTOR", "5")
@@ -54,6 +55,9 @@ func TestLoadBindsCacheEnvOnlyDeploymentFields(t *testing.T) {
 		memberlist.PeerNodes[0] != "cache-1:8946" ||
 		memberlist.PeerNodes[1] != "cache-2:8946" ||
 		memberlist.PeerDNSName != "tasks.cache" ||
+		len(memberlist.PeerDNSNames) != 2 ||
+		memberlist.PeerDNSNames[0] != "tasks.auth" ||
+		memberlist.PeerDNSNames[1] != "tasks.user" ||
 		memberlist.PeerDNSPort != 8946 ||
 		memberlist.PartitionCount != 509 ||
 		memberlist.ReplicationFactor != 5 {

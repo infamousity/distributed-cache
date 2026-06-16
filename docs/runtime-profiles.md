@@ -37,7 +37,9 @@ Use:
 
 - `CACHE_CLUSTER_MEMBERLIST_NODE_NAME="{{.Task.Name}}"` for a unique node name
 - `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME=tasks.<service>` for task-level DNS
-  peer discovery
+  peer discovery in one service
+- `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES=tasks.auth,tasks.user` when peers
+  are split across multiple connected stacks or services
 - `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT=<gossip-port>`
 - `CACHE_CLUSTER_MEMBERLIST_BIND_ADDRESS=0.0.0.0`
 - `CACHE_CLUSTER_MEMBERLIST_BIND_PORT=<gossip-port>`
@@ -84,6 +86,7 @@ common:
         advertise_addr: "{{ peerIP }}"
         advertise_port: 8946
         peer_dns_name: "{{ peerDNSName }}"
+        peer_dns_names: []
         peer_dns_port: 8946
 ```
 
@@ -172,7 +175,8 @@ Static deployments work with explicit peers or DNS records.
 Use:
 
 - `NodeName` set to a stable hostname or instance ID
-- `PeerNodes` with `host:port` entries, or a DNS name that resolves to peers
+- `PeerNodes` with `host:port` entries, or one or more DNS names that resolve
+  to peers
 - `AdvertiseAddr` set to an address other cache nodes can reach
 - `ControlAdvertiseAddr` set to the peer-reachable gRPC `host:port`
 - host firewalls that allow cache traffic only between trusted nodes

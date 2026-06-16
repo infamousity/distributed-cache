@@ -1562,7 +1562,7 @@ func (d *DistributedCache) stopRepairWorker() {
 }
 
 func (d *DistributedCache) startPeerWorker() {
-	if d.opts.PeerDNSName == "" && len(d.opts.PeerNodes) == 0 {
+	if len(d.opts.PeerNodes) == 0 && len(d.peerDNSNames()) == 0 {
 		return
 	}
 	d.joinConfiguredPeers()
@@ -1623,12 +1623,12 @@ func (d *DistributedCache) joinConfiguredPeers() {
 	}
 	peers := make([]string, 0, len(d.opts.PeerNodes)+4)
 	peers = append(peers, d.opts.PeerNodes...)
-	if d.opts.PeerDNSName != "" {
+	for _, name := range d.peerDNSNames() {
 		ctx, cancel := context.WithTimeout(context.Background(), d.opts.ControlTimeout)
-		dnsPeers, err := d.resolveDNSPeers(ctx)
+		dnsPeers, err := d.resolveDNSPeersForName(ctx, name)
 		cancel()
 		if err != nil {
-			d.logger.Warnf("failed to resolve peer DNS %s: %v", d.opts.PeerDNSName, err)
+			d.logger.Warnf("failed to resolve peer DNS %s: %v", name, err)
 		} else {
 			peers = append(peers, dnsPeers...)
 		}
@@ -1642,6 +1642,36 @@ func (d *DistributedCache) joinConfiguredPeers() {
 }
 
 func (d *DistributedCache) resolveDNSPeers(ctx context.Context) ([]string, error) {
+	names := d.peerDNSNames()
+	if len(names) == 0 {
+		return nil, nil
+	}
+	var (
+		out  []string
+		errs []error
+	)
+	seen := make(map[string]struct{})
+	for _, name := range names {
+		peers, err := d.resolveDNSPeersForName(ctx, name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		for _, peer := range peers {
+			if _, ok := seen[peer]; ok {
+				continue
+			}
+			seen[peer] = struct{}{}
+			out = append(out, peer)
+		}
+	}
+	if len(out) == 0 && len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	return out, nil
+}
+
+func (d *DistributedCache) resolveDNSPeersForName(ctx context.Context, name string) ([]string, error) {
 	port := d.opts.PeerDNSPort
 	if port == 0 {
 		port = d.opts.GossipBindPort
@@ -1649,7 +1679,7 @@ func (d *DistributedCache) resolveDNSPeers(ctx context.Context) ([]string, error
 	if port == 0 {
 		return nil, fmt.Errorf("peer DNS port is required")
 	}
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, d.opts.PeerDNSName)
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -1661,6 +1691,23 @@ func (d *DistributedCache) resolveDNSPeers(ctx context.Context) ([]string, error
 		out = append(out, net.JoinHostPort(ip.IP.String(), strconv.Itoa(port)))
 	}
 	return out, nil
+}
+
+func (d *DistributedCache) peerDNSNames() []string {
+	names := make([]string, 0, 1+len(d.opts.PeerDNSNames))
+	seen := make(map[string]struct{}, 1+len(d.opts.PeerDNSNames))
+	for _, name := range append([]string{d.opts.PeerDNSName}, d.opts.PeerDNSNames...) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names
 }
 
 func (d *DistributedCache) runRepairCycle() {
@@ -1932,6 +1979,7 @@ func configFromOptions(opts Options) (*config.Config, error) {
 	cfg.Common.Cache.Cluster.MemberList.AdvertisePort = opts.AdvertisePort
 	cfg.Common.Cache.Cluster.MemberList.PeerNodes = opts.PeerNodes
 	cfg.Common.Cache.Cluster.MemberList.PeerDNSName = opts.PeerDNSName
+	cfg.Common.Cache.Cluster.MemberList.PeerDNSNames = opts.PeerDNSNames
 	cfg.Common.Cache.Cluster.MemberList.PeerDNSPort = opts.PeerDNSPort
 	cfg.Common.Cache.Cluster.MemberList.PartitionCount = opts.PartitionCount
 	cfg.Common.Cache.Cluster.MemberList.ReplicationFactor = opts.ReplicationFactor
@@ -1992,6 +2040,7 @@ func optionsFromConfig(cfg *config.Config) Options {
 		AdvertisePort:               cfg.Common.Cache.Cluster.MemberList.AdvertisePort,
 		PeerNodes:                   cfg.Common.Cache.Cluster.MemberList.PeerNodes,
 		PeerDNSName:                 cfg.Common.Cache.Cluster.MemberList.PeerDNSName,
+		PeerDNSNames:                cfg.Common.Cache.Cluster.MemberList.PeerDNSNames,
 		PeerDNSPort:                 cfg.Common.Cache.Cluster.MemberList.PeerDNSPort,
 		SharedKey:                   cfg.Common.Cache.SharedKey,
 		Namespace:                   cfg.Common.Cache.Namespace,
@@ -2057,7 +2106,7 @@ func validateConfig(cfg *config.Config, opts Options) error {
 	if opts.MinReadyPeers < 0 {
 		return fmt.Errorf("min_ready_peers must be >= 0")
 	}
-	if cfg.Common.Cache.Cluster.MemberList.PeerDNSName != "" && cfg.Common.Cache.Cluster.MemberList.PeerDNSPort < 0 {
+	if (cfg.Common.Cache.Cluster.MemberList.PeerDNSName != "" || len(cfg.Common.Cache.Cluster.MemberList.PeerDNSNames) > 0) && cfg.Common.Cache.Cluster.MemberList.PeerDNSPort < 0 {
 		return fmt.Errorf("peer_dns_port must be >= 0")
 	}
 	if opts.RequireSharedKey && cfg.Common.Cache.SharedKey == "" {
