@@ -50,7 +50,10 @@ type DistributedCache struct {
 	peerWg   sync.WaitGroup
 
 	repairStop chan struct{}
+	repairNow  chan struct{}
 	repairWg   sync.WaitGroup
+	repairMu   sync.Mutex
+	repairLast time.Time
 
 	diagnosticsStop         chan struct{}
 	diagnosticsWg           sync.WaitGroup
@@ -487,6 +490,7 @@ func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error
 		retryStop:       make(chan struct{}),
 		peerStop:        make(chan struct{}),
 		repairStop:      make(chan struct{}),
+		repairNow:       make(chan struct{}, 1),
 		diagnosticsStop: make(chan struct{}),
 		keys:            make(map[string]keyMeta),
 		peerWarnLast:    make(map[string]time.Time),
@@ -1079,18 +1083,21 @@ func (d *DistributedCache) verifyPeer(name, addr string) {
 		d.logger.Warnf("peer identity mismatch for %s: ping returned %s from %s", name, got, addr)
 		return
 	}
-	d.setPeerState(name, addr, PeerStateVerified, "")
+	if d.setPeerState(name, addr, PeerStateVerified, "") {
+		d.scheduleRepair()
+	}
 }
 
-func (d *DistributedCache) setPeerState(name, addr string, state PeerState, lastErr string) {
+func (d *DistributedCache) setPeerState(name, addr string, state PeerState, lastErr string) bool {
 	if name == "" || name == d.cluster.GetNode().GetSelf() {
-		return
+		return false
 	}
 	now := time.Now()
 	d.peerMu.Lock()
-	if existing, ok := d.peers[name]; ok && existing.State == PeerStateLeft && (state == PeerStateUnreachable || state == PeerStateIdentityMismatch) {
+	existing, ok := d.peers[name]
+	if ok && existing.State == PeerStateLeft && (state == PeerStateUnreachable || state == PeerStateIdentityMismatch) {
 		d.peerMu.Unlock()
-		return
+		return false
 	}
 	d.peers[name] = PeerStatus{
 		Name:        name,
@@ -1101,6 +1108,7 @@ func (d *DistributedCache) setPeerState(name, addr string, state PeerState, last
 	}
 	d.peerMu.Unlock()
 	d.updatePeerMetrics()
+	return state == PeerStateVerified && (!ok || existing.State != PeerStateVerified || existing.ControlAddr != addr)
 }
 
 func (d *DistributedCache) validatedOwnerAddr(ctx context.Context, owner string) (string, error) {
@@ -1543,17 +1551,58 @@ func (d *DistributedCache) startRepairWorker() {
 	d.repairWg.Add(1)
 	go func() {
 		defer d.repairWg.Done()
-		ticker := time.NewTicker(d.opts.RepairInterval)
-		defer ticker.Stop()
+		timer := time.NewTimer(d.opts.RepairInterval)
+		defer timer.Stop()
 		for {
 			select {
-			case <-ticker.C:
+			case <-d.repairNow:
 				d.runRepairCycle()
+				resetRepairTimer(timer, d.opts.RepairInterval)
+			case <-timer.C:
+				d.markRepairRun()
+				d.runRepairCycle()
+				timer.Reset(d.opts.RepairInterval)
 			case <-d.repairStop:
 				return
 			}
 		}
 	}()
+}
+
+func (d *DistributedCache) scheduleRepair() {
+	if d.opts.RepairInterval <= 0 || d.isClosed() || !d.reserveRepairRun() {
+		return
+	}
+	select {
+	case d.repairNow <- struct{}{}:
+	default:
+	}
+}
+
+func (d *DistributedCache) reserveRepairRun() bool {
+	d.repairMu.Lock()
+	defer d.repairMu.Unlock()
+	if !d.repairLast.IsZero() && time.Since(d.repairLast) < d.opts.RepairInterval {
+		return false
+	}
+	d.repairLast = time.Now()
+	return true
+}
+
+func (d *DistributedCache) markRepairRun() {
+	d.repairMu.Lock()
+	d.repairLast = time.Now()
+	d.repairMu.Unlock()
+}
+
+func resetRepairTimer(timer *time.Timer, interval time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(interval)
 }
 
 func (d *DistributedCache) stopRepairWorker() {

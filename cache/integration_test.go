@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -250,6 +251,83 @@ func TestReadyRequiresMinimumVerifiedPeers(t *testing.T) {
 	status := c.Status()
 	if !status.Ready || status.VerifiedPeers != 1 {
 		t.Fatalf("unexpected status: %+v", status)
+	}
+}
+
+func TestSetPeerStateReportsVerifiedTransitionOnce(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "node-transition",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	if c.setPeerState("peer-1", "127.0.0.1:1", PeerStateJoined, "") {
+		t.Fatalf("joined state should not report verified transition")
+	}
+	if !c.setPeerState("peer-1", "127.0.0.1:1", PeerStateVerified, "") {
+		t.Fatalf("first verified state should report transition")
+	}
+	if c.setPeerState("peer-1", "127.0.0.1:1", PeerStateVerified, "") {
+		t.Fatalf("repeated verified state should not report transition")
+	}
+}
+
+func TestScheduleRepairUsesRepairIntervalAsDebounce(t *testing.T) {
+	c := &DistributedCache{
+		opts:      Options{RepairInterval: time.Hour},
+		repairNow: make(chan struct{}, 1),
+	}
+
+	c.scheduleRepair()
+	select {
+	case <-c.repairNow:
+	default:
+		t.Fatalf("expected first repair request to be scheduled")
+	}
+
+	c.scheduleRepair()
+	select {
+	case <-c.repairNow:
+		t.Fatalf("expected repair request inside interval to be suppressed")
+	default:
+	}
+
+	c.repairMu.Lock()
+	c.repairLast = time.Now().Add(-2 * time.Hour)
+	c.repairMu.Unlock()
+	c.scheduleRepair()
+	select {
+	case <-c.repairNow:
+	default:
+		t.Fatalf("expected repair request after interval to be scheduled")
+	}
+}
+
+func TestScheduleRepairDebounceReservesConcurrentRequests(t *testing.T) {
+	c := &DistributedCache{
+		opts:      Options{RepairInterval: time.Hour},
+		repairNow: make(chan struct{}, 100),
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.scheduleRepair()
+		}()
+	}
+	wg.Wait()
+
+	if got := len(c.repairNow); got != 1 {
+		t.Fatalf("scheduled repair requests = %d, want 1", got)
 	}
 }
 
@@ -816,6 +894,57 @@ func TestDistributedCacheReplicationAndForwarding(t *testing.T) {
 	}
 
 	waitForValue(t, c2, key, value, 2*time.Second)
+}
+
+func TestDistributedCacheRepairsExistingKeysWhenPeerJoins(t *testing.T) {
+	gossip1 := getFreePort(t)
+	gossip2 := getFreePort(t)
+	control1 := getFreePort(t)
+	control2 := getFreePort(t)
+
+	c1, err := Start(Options{
+		NodeName:                 "late-owner",
+		ControlBindAddr:          "127.0.0.1",
+		ControlBindPort:          control1,
+		GossipBindAddr:           "127.0.0.1",
+		GossipBindPort:           gossip1,
+		SharedKey:                "test-key",
+		ReplicationFactor:        2,
+		RepairInterval:           time.Hour,
+		ReplicationRetryInterval: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("start late-owner: %v", err)
+	}
+	defer c1.Close()
+
+	key := "late-key"
+	value := []byte("late-value")
+	if err := c1.Set(context.Background(), key, value, time.Minute); err != nil {
+		t.Fatalf("set before peer joins: %v", err)
+	}
+	waitForStoreValue(t, c1, key, value, time.Second)
+
+	c2, err := Start(Options{
+		NodeName:                 "late-peer",
+		ControlBindAddr:          "127.0.0.1",
+		ControlBindPort:          control2,
+		GossipBindAddr:           "127.0.0.1",
+		GossipBindPort:           gossip2,
+		PeerNodes:                []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
+		SharedKey:                "test-key",
+		ReplicationFactor:        2,
+		RepairInterval:           time.Hour,
+		ReplicationRetryInterval: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("start late-peer: %v", err)
+	}
+	defer c2.Close()
+
+	waitForMembers(t, c1, 2, 2*time.Second)
+	waitForMembers(t, c2, 2, 2*time.Second)
+	waitForStoreValue(t, c2, key, value, 3*time.Second)
 }
 
 func TestGetUsesLocalReplicaWhenOwnerControlPlaneFails(t *testing.T) {
