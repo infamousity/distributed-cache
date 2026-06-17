@@ -10,6 +10,7 @@
 !CHANGELOG.md
 !docs/*.md
 !.github/workflows/*.yml
+!.github/CODEOWNERS
 !examples/kubernetes/*.yaml
 !examples/swarm/docker-stack.yml
 !LICENSE
