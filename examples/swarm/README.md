@@ -187,8 +187,8 @@ the stack and are not part of the cache library API.
 
 Production services may expose cache-backed routes if that is part of their
 service contract. Those routes belong to the host service and must use the
-service's authn, authz, tenant isolation, validation, rate limiting, and audit
-model.
+service's authentication and authorization, tenant isolation, validation, rate
+limiting, and audit model.
 
 The cache control plane is private node-to-node infrastructure. Do not publish
 the gossip or gRPC control-plane ports externally.

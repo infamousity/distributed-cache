@@ -41,7 +41,8 @@ defer c.Close()
 - not a standalone public cache gateway
 - not a database or durable source of truth
 - not an external service API
-- not a substitute for service-level authn, authz, validation, or audit
+- not a substitute for service-level authentication, authorization, validation,
+  or audit
 
 The host service owns its public API. This module owns only the embedded cache
 API and the private cache-node control plane.
@@ -190,7 +191,7 @@ go get github.com/infamousity/distributed-cache@v0.1.1
 Feature branches may publish prerelease tags for integration testing:
 
 ```bash
-go get github.com/infamousity/distributed-cache@v0.1.2-authz-cache.20260611170530.abc1234def56
+go get github.com/infamousity/distributed-cache@v0.1.2-write-through-cache.20260611170530.abc1234def56
 ```
 
 See [Contributing](https://github.com/infamousity/distributed-cache/blob/main/CONTRIBUTING.md)

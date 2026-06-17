@@ -44,8 +44,8 @@ other Go projects before the feature is merged.
 Only branches under `feature/` publish prerelease tags:
 
 ```bash
-git switch -c feature/authz-cache
-git push -u origin feature/authz-cache
+git switch -c feature/write-through-cache
+git push -u origin feature/write-through-cache
 ```
 
 The `feature/` prefix is stripped before the prerelease tag is built. The
@@ -59,19 +59,19 @@ remaining branch name must already be a valid SemVer prerelease identifier:
 Good branch names:
 
 ```text
-feature/authz-cache
-feature/authz-cache.2
-feature/sidecar-distributed-cache
+feature/write-through-cache
+feature/write-through-cache.2
+feature/multi-node-repair
 ```
 
 Bad branch names:
 
 ```text
-feature/authz_cache
-feature/authz/cache
-feature/.authz-cache
-feature/authz-cache.
-feature/authz-cache.01
+feature/write_through_cache
+feature/write-through/cache
+feature/.write-through-cache
+feature/write-through-cache.
+feature/write-through-cache.01
 ```
 
 On each push to a valid `feature/*` branch, the `feature prerelease` workflow:
@@ -92,19 +92,19 @@ v0.1.1
 then a push to:
 
 ```text
-feature/authz-cache
+feature/write-through-cache
 ```
 
 creates a tag shaped like:
 
 ```text
-v0.1.2-authz-cache.20260611170530.abc1234def56
+v0.1.2-write-through-cache.20260611170530.abc1234def56
 ```
 
 That version can be consumed from another Go module:
 
 ```bash
-go get github.com/infamousity/distributed-cache@v0.1.2-authz-cache.20260611170530.abc1234def56
+go get github.com/infamousity/distributed-cache@v0.1.2-write-through-cache.20260611170530.abc1234def56
 ```
 
 Prerelease tags are intentionally unique per commit and must not be moved. If a

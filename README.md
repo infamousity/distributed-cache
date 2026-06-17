@@ -214,8 +214,9 @@ This module is an embedded cache library, not a standalone cache gateway. The
 CRUD cache API is the Go API used by the host service process.
 
 Host services decide whether to expose cache-backed operations through their own
-service APIs. If they do, those routes must use the service's normal authn,
-authz, tenant isolation, validation, rate limiting, and audit model.
+service APIs. If they do, those routes must use the service's normal
+authentication and authorization, tenant isolation, validation, rate limiting,
+and audit model.
 
 The cache control plane is different: it is private infrastructure between cache
 nodes. Keep gossip and gRPC control-plane listeners on private/internal networks

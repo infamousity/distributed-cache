@@ -80,7 +80,8 @@ The NetworkPolicy allows:
 
 It does not expose those ports externally. Any HTTP/JSON/GraphQL/etc. endpoint
 that uses the cache belongs to the host service and should be exposed through a
-separate Service and the host service's normal authn/authz model.
+separate Service and the host service's normal authentication and authorization
+model.
 
 ## Readiness
 

@@ -194,7 +194,7 @@ docker network inspect traefik-public \
 Using a shared internal discovery overlay can work when it is the intended trust
 boundary, but a dedicated cache overlay is preferred because it limits who can
 reach memberlist gossip and the gRPC control plane. If the chosen shared network
-is broader than the cache participants, configure shared-key/TLS policy
+is broader than the cache nodes, configure shared-key/TLS policy
 accordingly and keep cache ports unpublished.
 
 To verify the value from inside a running task, inspect the task container's

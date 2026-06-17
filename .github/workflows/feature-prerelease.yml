@@ -48,9 +48,9 @@ jobs:
             - each segment must start with a letter or digit
 
           Examples:
-            feature/authz-cache
-            feature/authz-cache.2
-            feature/sidecar-distributed-cache
+            feature/write-through-cache
+            feature/write-through-cache.2
+            feature/multi-node-repair
           EOF
             exit 1
           fi
