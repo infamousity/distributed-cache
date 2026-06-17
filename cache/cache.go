@@ -473,6 +473,11 @@ func (d *DistributedCache) Close() error {
 func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error) {
 	logger := log.Default()
 
+	if err := normalizeMemberlistAdvertise(cfg); err != nil {
+		return nil, err
+	}
+	opts.AdvertiseAddr = cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr
+	opts.AdvertisePort = cfg.Common.Cache.Cluster.MemberList.AdvertisePort
 	if err := validateConfig(cfg, opts); err != nil {
 		return nil, err
 	}
@@ -2166,13 +2171,48 @@ func validateConfig(cfg *config.Config, opts Options) error {
 			return err
 		}
 	}
+	if cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr != "" {
+		if err := validateMemberlistAdvertiseAddr(cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr); err != nil {
+			return err
+		}
+	}
 	if opts.FailFast {
 		controlBind := cfg.Common.Cache.Control.BindAddr
 		if (controlBind == "" || controlBind == "0.0.0.0") && cfg.Common.Cache.Control.AdvertiseAddr == "" && cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr == "" {
-			return fmt.Errorf("control bind address is %q without advertise address; set api.advertise_addr, memberlist advertise_address, or explicit control bind addr", controlBind)
+			return fmt.Errorf("control bind address is %q without advertise address; set api.advertise_addr, memberlist advertise_addr, or explicit control bind addr", controlBind)
 		}
 	}
 	return nil
+}
+
+func normalizeMemberlistAdvertise(cfg *config.Config) error {
+	addr := strings.TrimSpace(cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr)
+	if addr == "" {
+		return nil
+	}
+	if net.ParseIP(addr) != nil {
+		return nil
+	}
+	if !strings.Contains(addr, ":") {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err == nil {
+		if host == "" || port == "" {
+			return fmt.Errorf("invalid memberlist advertise addr %q: host and port are required", addr)
+		}
+		parsedPort, err := strconv.Atoi(port)
+		if err != nil || parsedPort <= 0 {
+			return fmt.Errorf("invalid memberlist advertise addr %q: port must be a positive integer", addr)
+		}
+		if cfg.Common.Cache.Cluster.MemberList.AdvertisePort != 0 && cfg.Common.Cache.Cluster.MemberList.AdvertisePort != parsedPort {
+			return fmt.Errorf("memberlist advertise addr port %d conflicts with advertise_port %d", parsedPort, cfg.Common.Cache.Cluster.MemberList.AdvertisePort)
+		}
+		cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = host
+		cfg.Common.Cache.Cluster.MemberList.AdvertisePort = parsedPort
+		return nil
+	}
+	return fmt.Errorf("invalid memberlist advertise addr %q: %w", addr, err)
 }
 
 func ensureSharedKey(cfg *config.Config, opts *Options, logger log.Interface) error {
@@ -2197,6 +2237,17 @@ func generateSharedKey() (string, error) {
 		return "", fmt.Errorf("generate shared key: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
+}
+
+func validateMemberlistAdvertiseAddr(addr string) error {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return fmt.Errorf("invalid memberlist advertise addr %q: must be an IP address, not a DNS name", addr)
+	}
+	if ip.IsUnspecified() {
+		return fmt.Errorf("invalid memberlist advertise addr %q: must be peer-reachable, not a wildcard bind address", addr)
+	}
+	return nil
 }
 
 func validateControlAdvertiseAddr(addr string) error {

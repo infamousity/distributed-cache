@@ -150,6 +150,52 @@ common:
 	}
 }
 
+func TestLoadCanonicalMemberlistAdvertiseAddr(t *testing.T) {
+	t.Setenv("CACHE_CONFIG", "")
+
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte(`
+common:
+  cache:
+    cluster:
+      memberlist:
+        advertise_addr: "10.10.1.7"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr; got != "10.10.1.7" {
+		t.Fatalf("memberlist advertise addr = %q", got)
+	}
+}
+
+func TestLoadLegacyMemberlistAdvertiseAddressAlias(t *testing.T) {
+	t.Setenv("CACHE_CONFIG", "")
+
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte(`
+common:
+  cache:
+    cluster:
+      memberlist:
+        advertise_address: "10.10.1.7"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr; got != "10.10.1.7" {
+		t.Fatalf("memberlist advertise addr = %q", got)
+	}
+}
+
 func TestTemplateHelpersRenderPeerDNSIPAndAddr(t *testing.T) {
 	getenv := mapGetter(map[string]string{
 		"CACHE_RUNTIME":            "swarm",
@@ -341,7 +387,7 @@ func TestSwarmExampleConfigDocumentsTemplateHelpers(t *testing.T) {
 	for _, want := range []string{
 		"peerDNSName, peerIP, and peerAddr are config-template functions",
 		`advertise_addr: "{{ peerAddr 9090 }}"`,
-		`advertise_addr: "{{ peerIP }}"`,
+		`advertise_addr: "{{ peerAddr 8946 }}"`,
 		`peer_dns_name: "{{ peerDNSName }}"`,
 	} {
 		if !strings.Contains(text, want) {

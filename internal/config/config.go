@@ -57,12 +57,12 @@ type Config struct {
 				} `mapstructure:"tls"`
 				MemberList struct {
 					NodeName          string   `mapstructure:"node_name"`
-					BindAddr          string   `mapstructure:"bind_address"`            // e.g. "0.0.0.0"
+					BindAddr          string   `mapstructure:"bind_address"`            // listener address, e.g. "0.0.0.0"
 					BindAddrFilter    []string `mapstructure:"bind_address_filter"`     // defaults to ["10.0.0.0/8", "172.0.0.0/8", "192.0.0.0/8"]
 					BindIfcPriority   []string `mapstructure:"bind_interface_priority"` // defaults to ["^en.*$", "^eth.*$", "^wl.*$"]
 					BindPort          int      `mapstructure:"bind_port"`               // gossip port, e.g. 8946
-					AdvertiseAddr     string   `mapstructure:"advertise_address"`       // optional; falls back to BindAddr
-					AdvertisePort     int      `mapstructure:"advertise_port"`          // usually same as BindPort
+					AdvertiseAddr     string   `mapstructure:"advertise_addr"`          // peer-reachable gossip IP or IP:port; falls back to BindAddr when omitted
+					AdvertisePort     int      `mapstructure:"advertise_port"`          // gossip advertise port; can be supplied via advertise_addr endpoint form
 					PeerNodes         []string `mapstructure:"peer_nodes"`              // gossip peer addresses: ["10.10.1.3:8946", ...]
 					PeerDNSName       string   `mapstructure:"peer_dns_name"`           // optional DNS name resolved into peer addresses
 					PeerDNSNames      []string `mapstructure:"peer_dns_names"`          // optional DNS names resolved into peer addresses
@@ -130,6 +130,9 @@ func internalBinds(v *viper.Viper) error {
 		return err
 	}
 	if err := v.BindEnv("common.cache.cluster.memberlist.bind_port", "CACHE_CLUSTER_MEMBERLIST_BIND_PORT"); err != nil {
+		return err
+	}
+	if err := v.BindEnv("common.cache.cluster.memberlist.advertise_addr", "CACHE_CLUSTER_MEMBERLIST_ADVERTISE_ADDRESS", "CACHE_GOSSIP_ADVERTISE_ADDR", "CACHE_ADVERTISE_ADDR"); err != nil {
 		return err
 	}
 	if err := v.BindEnv("common.cache.cluster.memberlist.advertise_address", "CACHE_CLUSTER_MEMBERLIST_ADVERTISE_ADDRESS", "CACHE_GOSSIP_ADVERTISE_ADDR", "CACHE_ADVERTISE_ADDR"); err != nil {
@@ -364,6 +367,7 @@ func Load(paths ...string) (*Config, error) {
 		}
 		base.Set("common.cache.cluster.memberlist.bind_interface_priority", ifcPriority)
 	}
+	normalizeMemberlistAdvertiseAlias(base)
 
 	// decode
 	cfg := new(Config)
@@ -382,6 +386,17 @@ func Load(paths ...string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func normalizeMemberlistAdvertiseAlias(v *viper.Viper) {
+	const canonical = "common.cache.cluster.memberlist.advertise_addr"
+	const legacy = "common.cache.cluster.memberlist.advertise_address"
+	if strings.TrimSpace(v.GetString(canonical)) != "" {
+		return
+	}
+	if value := strings.TrimSpace(v.GetString(legacy)); value != "" {
+		v.Set(canonical, value)
+	}
 }
 
 func newRootTemplate(ipFunc func() (string, error)) *template.Template {

@@ -138,6 +138,82 @@ func TestValidateConfigRejectsInvalidControlAdvertiseAddr(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsInvalidMemberlistAdvertiseAddr(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = "node1"
+	if err := validateConfig(cfg, Options{}); err == nil {
+		t.Fatalf("expected DNS memberlist advertise addr to be rejected")
+	}
+
+	cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = "0.0.0.0"
+	if err := validateConfig(cfg, Options{}); err == nil {
+		t.Fatalf("expected wildcard memberlist advertise addr to be rejected")
+	}
+}
+
+func TestNormalizeMemberlistAdvertiseAddr(t *testing.T) {
+	cases := []struct {
+		name     string
+		addr     string
+		port     int
+		wantAddr string
+		wantPort int
+		wantErr  bool
+	}{
+		{
+			name:     "ipv4 endpoint",
+			addr:     "127.0.0.1:8946",
+			wantAddr: "127.0.0.1",
+			wantPort: 8946,
+		},
+		{
+			name:     "ipv6 endpoint",
+			addr:     "[2001:db8::1]:8946",
+			wantAddr: "2001:db8::1",
+			wantPort: 8946,
+		},
+		{
+			name:     "ipv6 address",
+			addr:     "2001:db8::1",
+			wantAddr: "2001:db8::1",
+		},
+		{
+			name:     "dns address",
+			addr:     "node1",
+			wantAddr: "node1",
+		},
+		{
+			name:    "conflicting port",
+			addr:    "127.0.0.1:8946",
+			port:    18946,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = tc.addr
+			cfg.Common.Cache.Cluster.MemberList.AdvertisePort = tc.port
+
+			err := normalizeMemberlistAdvertise(cfg)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalize: %v", err)
+			}
+			got := cfg.Common.Cache.Cluster.MemberList
+			if got.AdvertiseAddr != tc.wantAddr || got.AdvertisePort != tc.wantPort {
+				t.Fatalf("memberlist advertise = (%q, %d), want (%q, %d)", got.AdvertiseAddr, got.AdvertisePort, tc.wantAddr, tc.wantPort)
+			}
+		})
+	}
+}
+
 func TestControlAdvertiseAddrSetsSelfForwardAddress(t *testing.T) {
 	controlPort := getFreePort(t)
 	controlAddr := fmt.Sprintf("127.0.0.1:%d", controlPort)
@@ -162,6 +238,28 @@ func TestControlAdvertiseAddrSetsSelfForwardAddress(t *testing.T) {
 	}
 	if got != controlAddr {
 		t.Fatalf("self forward address = %q, want %q", got, controlAddr)
+	}
+}
+
+func TestStartAcceptsMemberlistAdvertiseEndpoint(t *testing.T) {
+	gossipPort := getFreePort(t)
+	c, err := Start(Options{
+		NodeName:          "node-memberlist-advertise-endpoint",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossipPort,
+		AdvertiseAddr:     fmt.Sprintf("127.0.0.1:%d", gossipPort),
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	if c.opts.AdvertiseAddr != "127.0.0.1" || c.opts.AdvertisePort != gossipPort {
+		t.Fatalf("memberlist advertise = (%q, %d), want (%q, %d)", c.opts.AdvertiseAddr, c.opts.AdvertisePort, "127.0.0.1", gossipPort)
 	}
 }
 

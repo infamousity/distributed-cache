@@ -5,7 +5,9 @@
 #   CACHE_RUNTIME=swarm and CACHE_SWARM_SERVICE_NAME. For multi-stack peer
 #   discovery, set peer_dns_names to a list of tasks.<service> names.
 # - peerIP selects this task's local IPv4 address on the peer DNS subnet.
-# - peerAddr returns that IP as host:port.
+# - peerAddr returns that IP as host:port for endpoint-shaped advertise fields.
+# Bind addresses are listener addresses. Advertise addresses are what peers
+# dial, so memberlist advertise_addr must resolve to this task's overlay IP.
 common:
   cache:
     log:
@@ -22,8 +24,7 @@ common:
         node_name: '{{ env "CACHE_CLUSTER_MEMBERLIST_NODE_NAME" }}'
         bind_address: "0.0.0.0"
         bind_port: 8946
-        advertise_addr: "{{ peerIP }}"
-        advertise_port: 8946
+        advertise_addr: "{{ peerAddr 8946 }}"
         peer_dns_name: "{{ peerDNSName }}"
         peer_dns_names: []
         peer_dns_port: 8946
