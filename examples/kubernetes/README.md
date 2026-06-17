@@ -38,6 +38,21 @@ Memberlist advertisement uses `status.podIP` because memberlist requires an IP
 advertise address. The gRPC control-plane advertise address may use pod IP or a
 stable pod DNS name, as long as peer pods can dial it.
 
+`peer_network_cidrs` is usually not needed for this Kubernetes shape. The
+headless Service returns pod IPs, and the downward API provides the local pod IP
+for advertisement. Use `peer_network_cidrs` only when pods have more than one
+routable network attachment and cache traffic must be constrained to one of
+them.
+
+If you do need it, use the cache traffic network's CIDR:
+
+- ordinary Kubernetes: the pod CIDR, usually visible through
+  `kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.podCIDR}{"\n"}{end}'`
+- Rancher/RKE/RKE2/K3s: the cluster pod CIDR from the cluster/networking
+  configuration, not the Service CIDR or ingress network
+- Multus or another multi-network CNI: the CIDR from the specific
+  `NetworkAttachmentDefinition` used for cache gossip/control traffic
+
 The manifest uses canonical config-loader env names:
 
 - `CACHE_CLUSTER_MEMBERLIST_NODE_NAME`

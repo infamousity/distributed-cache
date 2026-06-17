@@ -138,6 +138,77 @@ task's gossip advertise IP. Without the filter, `advertise_addr: auto` only
 succeeds when peer DNS maps to exactly one local network; ambiguous multi-overlay
 matches fail at startup.
 
+### Choosing `peer_network_cidrs`
+
+`peer_network_cidrs` answers one question: which network plane is
+distributed-cache allowed to use for peer discovery and node-to-node traffic? It
+should be the subnet or subnets for networks that all intended cache peers can
+use to dial each other. It should not be every subnet attached to the container.
+
+The easiest production answer is to make the cache network explicit in the stack
+file and reuse that same subnet in distributed-cache config:
+
+```yaml
+networks:
+  cache_control:
+    driver: overlay
+    internal: true
+    attachable: false
+    ipam:
+      config:
+        - subnet: 10.60.0.0/24
+```
+
+```yaml
+common:
+  cache:
+    cluster:
+      memberlist:
+        advertise_addr: auto
+        peer_network_cidrs:
+          - 10.60.0.0/24
+```
+
+This removes guesswork. The config developer reads the cache overlay IPAM block
+and copies that subnet into `peer_network_cidrs`.
+
+If the overlay subnet is assigned by Docker instead of declared in the stack,
+inspect the network from a Swarm manager:
+
+```bash
+docker network inspect <stack>_cache_control \
+  --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}'
+```
+
+For an existing shared internal discovery network, such as a Traefik/proxy
+overlay that every relevant service already joins, inspect that network instead:
+
+```bash
+docker network inspect traefik-public \
+  --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}'
+```
+
+Using a shared internal discovery overlay can work when it is the intended trust
+boundary, but a dedicated cache overlay is preferred because it limits who can
+reach memberlist gossip and the gRPC control plane. If the chosen shared network
+is broader than the cache participants, configure shared-key/TLS policy
+accordingly and keep cache ports unpublished.
+
+To verify the value from inside a running task, inspect the task container's
+network attachments on its node:
+
+```bash
+docker ps --filter label=com.docker.swarm.service.name=<stack>_<service>
+docker inspect <container-id> --format '{{json .NetworkSettings.Networks}}'
+```
+
+The selected `peer_network_cidrs` should include the IP address for the intended
+cache/discovery network and exclude unrelated overlays such as ingress, egress,
+database, queue, or broad application networks. When multiple cache networks are
+intentionally valid, include all of them. If this node is attached to more than
+one configured CIDR, `advertise_addr: auto` is ambiguous; narrow the CIDRs for
+that service or set `advertise_addr` explicitly.
+
 When using config files, `peerDNSName`, `peerIP`, and `peerAddr` are
 config-template functions evaluated by the repository config loader before YAML
 is decoded. They are not env vars, YAML fields, or `cache.Options` members.
@@ -247,7 +318,41 @@ Downward API, so prefer `status.podIP` for memberlist advertise addresses
 there. `peerIP` is still useful for config-file-driven runtimes where the local
 peer network must be inferred from DNS.
 
-## Podman, Systemd, and VMs
+Kubernetes usually does not need `peer_network_cidrs`: headless Service DNS
+returns pod IPs, and `status.podIP` provides this pod's memberlist advertise IP
+directly. Add `peer_network_cidrs` only when DNS can return addresses from
+multiple routable pod networks, or when the workload has multiple network
+attachments and only one is the cache traffic plane.
+
+For ordinary Kubernetes clusters, the relevant subnet is the pod CIDR. Depending
+on cluster permissions and distribution, a config developer can find it from one
+of these sources:
+
+```bash
+kubectl get nodes \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.podCIDR}{"\n"}{end}'
+kubectl cluster-info dump | grep -i cluster-cidr
+kubectl -n kube-system get configmap kube-proxy -o yaml | grep -i clusterCIDR
+```
+
+Many managed Kubernetes and Rancher-provisioned clusters hide or vary these
+fields. In that case, prefer the normal Kubernetes shape: advertise `status.podIP`,
+discover peers through a headless Service, and leave `peer_network_cidrs` unset
+unless there is a concrete multi-network problem to solve.
+
+For Multus or another multi-network CNI, use the CIDR assigned to the specific
+network attachment that carries cache gossip/control traffic. The source of truth
+is usually the CNI/IPAM section in the `NetworkAttachmentDefinition`:
+
+```bash
+kubectl get network-attachment-definition <name> -o yaml
+```
+
+Rancher does not change the distributed-cache rule. For RKE/RKE2/K3s clusters,
+the answer is still the pod network CIDR or the Multus/cache attachment CIDR,
+not the Service CIDR and not an ingress/load-balancer network.
+
+## Podman, Docker Compose, Systemd, and VMs
 
 Static deployments work with explicit peers or DNS records.
 
@@ -289,6 +394,37 @@ Firewall expectations:
 - allow TCP and UDP `8946` only from peer cache nodes
 - allow TCP `9090` only from peer cache nodes
 - deny external access to both ports
+
+Single-network Compose and Podman setups normally do not need
+`peer_network_cidrs`. It becomes useful when a container joins multiple networks
+and DNS discovery can return addresses from more than one of them.
+
+For Docker Compose, either declare the cache network subnet:
+
+```yaml
+networks:
+  cache_control:
+    ipam:
+      config:
+        - subnet: 172.30.10.0/24
+```
+
+or inspect the created network:
+
+```bash
+docker network inspect <project>_cache_control \
+  --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}'
+```
+
+For Podman, inspect the network that carries cache traffic:
+
+```bash
+podman network inspect cache_control
+```
+
+Use the subnet from that network's IPAM config. As with Swarm, do not use every
+network attached to the container; use only the network where distributed-cache
+peers are supposed to discover and dial each other.
 
 ## Readiness
 

@@ -7,8 +7,9 @@
 # - peerIP selects this task's local IPv4 address on the peer DNS subnet.
 # - peerAddr returns that IP as host:port for endpoint-shaped advertise fields.
 # For multi-overlay Swarm services, set peer_network_cidrs to the cache overlay
-# subnet. DNS peer discovery and advertise_addr: auto will then use only that
-# network instead of every IP returned by tasks.<service>.
+# subnet from the network IPAM config, or from `docker network inspect` for an
+# existing overlay. DNS peer discovery and advertise_addr: auto will then use
+# only that network instead of every IP returned by tasks.<service>.
 # Bind addresses are listener addresses. Advertise addresses are what peers
 # dial, so memberlist advertise_addr must resolve to this task's overlay IP.
 common:

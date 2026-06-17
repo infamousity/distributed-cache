@@ -148,6 +148,8 @@ memberlist advertisement with `advertise_addr: auto`. Use `peer_dns_names` or
 connected stacks. If a task is attached to more than one overlay network, set
 `peer_network_cidrs` / `CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS` to the cache
 overlay CIDR so DNS peer discovery ignores addresses from non-cache networks.
+Prefer declaring that subnet in the Swarm network IPAM block; otherwise inspect
+the chosen overlay network with `docker network inspect`.
 
 For the full runtime contract, including required fields, derived advertise
 addresses, bind-address fallbacks, and operational defaults, see
@@ -349,6 +351,8 @@ TLS is optional and configured in `common.cache.cluster.tls`. To enable mutual T
 - `common.cache.cluster.memberlist.advertise_addr: auto` derives the local memberlist advertise IP from `peer_network_cidrs`, or from `peer_dns_name` when that resolves to exactly one matching local network.
 - `common.cache.cluster.memberlist.peer_dns_name` plus `peer_dns_port` enables generic DNS peer discovery with periodic refresh; `peer_dns_names` accepts multiple DNS names for multi-stack or multi-service discovery. Static `peer_nodes` still works.
 - `common.cache.cluster.memberlist.peer_network_cidrs` filters DNS peer discovery and `advertise_addr: auto` to the selected cache network. Use it in Swarm when `tasks.<service>` can return task IPs from multiple overlay networks.
+  The value should come from the cache/discovery network's IPAM subnet, not from
+  every network attached to the task.
 - `peerDNSName`, `peerIP`, and `peerAddr` are config-template functions
   evaluated by the repository config loader before YAML is decoded. They are not
   env vars, YAML fields, or `cache.Options` members. `peerIP` and `peerAddr` can

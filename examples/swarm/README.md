@@ -224,6 +224,9 @@ Important details:
   `CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS` when set, otherwise it can derive
   one from `CACHE_PEER_DNS_NAME` for simple one-overlay examples. Set the peer
   network CIDR when a task is attached to more than one overlay network.
+- The CIDR should come from the intended cache/discovery overlay's IPAM config.
+  Prefer declaring it in the stack file; for existing overlays, inspect it with
+  `docker network inspect <network> --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}'`.
 - The `cache_control` network is internal, encrypted, and not attachable. The
   proof harness runs as a Swarm service on that overlay instead of creating
   one-shot containers or publishing host ports.
