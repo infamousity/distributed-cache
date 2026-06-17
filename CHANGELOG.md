@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/infamousity/distributed-cache/compare/v0.2.2...v0.2.3) (2026-06-17)
+
+
+### Bug Fixes
+
+* **cache:** suppress post-quorum cancellation retries ([3dd6d58](https://github.com/infamousity/distributed-cache/commit/3dd6d58c20c3d72878f91021b3487a31dcd4c993))
+
 ## [0.2.2](https://github.com/infamousity/distributed-cache/compare/v0.2.1...v0.2.2) (2026-06-17)
 
 
