@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/infamousity/distributed-cache/compare/v0.2.0...v0.2.1) (2026-06-17)
+
+
+### Bug Fixes
+
+* **config:** filter swarm peer discovery by network cidr ([8cf2542](https://github.com/infamousity/distributed-cache/commit/8cf2542e0369d6bc976e3dc7734331b921971f23))
+
 ## [0.2.0](https://github.com/infamousity/distributed-cache/compare/v0.1.3...v0.2.0) (2026-06-17)
 
 
