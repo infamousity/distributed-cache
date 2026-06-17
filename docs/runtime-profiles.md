@@ -133,8 +133,11 @@ If services are attached to multiple overlay networks, the same `tasks.<service>
 name can return one task IP per shared overlay. Configure
 `peer_network_cidrs`/`CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS` with the cache
 overlay subnet in that case. The filter is applied to DNS peer discovery before
-memberlist join, and `advertise_addr: auto` uses the same filter to choose this
-task's gossip advertise IP. Without the filter, `advertise_addr: auto` only
+memberlist join, and the same filter constrains this node's memberlist advertise
+IP. If `advertise_addr` is omitted, the library derives it from
+`peer_network_cidrs`; `advertise_addr: auto` does the same explicitly. If
+memberlist `advertise_addr` or an IP-shaped `api.advertise_addr` is set outside
+those CIDRs, startup fails. Without the filter, `advertise_addr: auto` only
 succeeds when peer DNS maps to exactly one local network; ambiguous multi-overlay
 matches fail at startup.
 
@@ -207,7 +210,10 @@ cache/discovery network and exclude unrelated overlays such as ingress, egress,
 database, queue, or broad application networks. When multiple cache networks are
 intentionally valid, include all of them. If this node is attached to more than
 one configured CIDR, `advertise_addr: auto` is ambiguous; narrow the CIDRs for
-that service or set `advertise_addr` explicitly.
+that service or set `advertise_addr` explicitly to an IP inside one of those
+CIDRs. If `api.advertise_addr` is also set to an IP address, it must be inside
+the same selected cache network CIDRs; DNS control advertise names are accepted
+because the library cannot know their runtime resolution in every platform.
 
 When using config files, `peerDNSName`, `peerIP`, and `peerAddr` are
 config-template functions evaluated by the repository config loader before YAML

@@ -2189,7 +2189,8 @@ func validateConfig(cfg *config.Config, opts Options) error {
 	if (cfg.Common.Cache.Cluster.MemberList.PeerDNSName != "" || len(cfg.Common.Cache.Cluster.MemberList.PeerDNSNames) > 0) && cfg.Common.Cache.Cluster.MemberList.PeerDNSPort < 0 {
 		return fmt.Errorf("peer_dns_port must be >= 0")
 	}
-	if _, err := parsePeerNetworkCIDRs(cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs); err != nil {
+	peerNetworks, err := parsePeerNetworkCIDRs(cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs)
+	if err != nil {
 		return err
 	}
 	if opts.RequireSharedKey && cfg.Common.Cache.SharedKey == "" {
@@ -2199,9 +2200,15 @@ func validateConfig(cfg *config.Config, opts Options) error {
 		if err := validateControlAdvertiseAddr(cfg.Common.Cache.Control.AdvertiseAddr); err != nil {
 			return err
 		}
+		if err := validateControlAdvertiseAddrPeerNetwork(cfg.Common.Cache.Control.AdvertiseAddr, peerNetworks); err != nil {
+			return err
+		}
 	}
 	if cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr != "" {
 		if err := validateMemberlistAdvertiseAddr(cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr); err != nil {
+			return err
+		}
+		if err := validateAdvertiseAddrPeerNetwork(cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr, peerNetworks); err != nil {
 			return err
 		}
 	}
@@ -2217,6 +2224,13 @@ func validateConfig(cfg *config.Config, opts Options) error {
 func normalizeMemberlistAdvertise(cfg *config.Config) error {
 	addr := strings.TrimSpace(cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr)
 	if addr == "" {
+		if len(cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs) > 0 {
+			ip, err := localAdvertiseIPForPeerNetworks(cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs)
+			if err != nil {
+				return err
+			}
+			cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = ip
+		}
 		return nil
 	}
 	if strings.EqualFold(addr, "auto") {
@@ -2447,6 +2461,38 @@ func validateMemberlistAdvertiseAddr(addr string) error {
 		return fmt.Errorf("invalid memberlist advertise addr %q: must be peer-reachable, not a wildcard bind address", addr)
 	}
 	return nil
+}
+
+func validateAdvertiseAddrPeerNetwork(addr string, networks []*net.IPNet) error {
+	if len(networks) == 0 {
+		return nil
+	}
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return nil
+	}
+	if ipInAnyNetwork(ip, networks) {
+		return nil
+	}
+	return fmt.Errorf("memberlist advertise addr %q is outside peer_network_cidrs", addr)
+}
+
+func validateControlAdvertiseAddrPeerNetwork(addr string, networks []*net.IPNet) error {
+	if len(networks) == 0 {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil
+	}
+	if ipInAnyNetwork(ip, networks) {
+		return nil
+	}
+	return fmt.Errorf("control advertise addr %q is outside peer_network_cidrs", addr)
 }
 
 func validateControlAdvertiseAddr(addr string) error {

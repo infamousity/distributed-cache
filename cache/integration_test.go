@@ -229,6 +229,42 @@ func TestValidateConfigRejectsInvalidPeerNetworkCIDR(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsMemberlistAdvertiseOutsidePeerNetworkCIDR(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = "10.136.6.188"
+	cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs = []string{"10.136.10.0/24"}
+	if err := validateConfig(cfg, Options{}); err == nil {
+		t.Fatalf("expected memberlist advertise addr outside peer_network_cidrs to fail validation")
+	}
+}
+
+func TestValidateConfigAllowsMemberlistAdvertiseInsidePeerNetworkCIDR(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = "10.136.10.188"
+	cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs = []string{"10.136.10.0/24"}
+	if err := validateConfig(cfg, Options{}); err != nil {
+		t.Fatalf("expected memberlist advertise addr inside peer_network_cidrs to pass validation: %v", err)
+	}
+}
+
+func TestValidateConfigRejectsControlAdvertiseOutsidePeerNetworkCIDR(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Common.Cache.Control.AdvertiseAddr = "10.136.6.188:9090"
+	cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs = []string{"10.136.10.0/24"}
+	if err := validateConfig(cfg, Options{}); err == nil {
+		t.Fatalf("expected control advertise addr outside peer_network_cidrs to fail validation")
+	}
+}
+
+func TestValidateConfigAllowsControlAdvertiseDNSWithPeerNetworkCIDR(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Common.Cache.Control.AdvertiseAddr = "cache-1.internal:9090"
+	cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs = []string{"10.136.10.0/24"}
+	if err := validateConfig(cfg, Options{}); err != nil {
+		t.Fatalf("expected DNS control advertise addr with peer_network_cidrs to pass validation: %v", err)
+	}
+}
+
 func TestNormalizeMemberlistAdvertiseAutoRequiresPeerNetworkCIDR(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = "auto"

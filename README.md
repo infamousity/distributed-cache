@@ -348,11 +348,13 @@ TLS is optional and configured in `common.cache.cluster.tls`. To enable mutual T
 - The config `common.cache.api` section now defines the **control-plane** bind address/port.
 - `common.cache.api.advertise_addr` may be set to the peer-reachable `host:port` for the control plane. This is separate from memberlist gossip advertisement and is useful in runtimes where bind and peer-reachable addresses differ.
 - `common.cache.cluster.memberlist.advertise_addr` may be set to a peer-reachable IP or `IP:port`. Endpoint form is normalized internally to memberlist's address and port fields. Memberlist requires an IP advertise address, not a DNS name.
-- `common.cache.cluster.memberlist.advertise_addr: auto` derives the local memberlist advertise IP from `peer_network_cidrs`, or from `peer_dns_name` when that resolves to exactly one matching local network.
+- `common.cache.cluster.memberlist.advertise_addr: auto` derives the local memberlist advertise IP from `peer_network_cidrs`, or from `peer_dns_name` when that resolves to exactly one matching local network. If `peer_network_cidrs` is set and `advertise_addr` is omitted, the library derives the advertise IP from those CIDRs.
 - `common.cache.cluster.memberlist.peer_dns_name` plus `peer_dns_port` enables generic DNS peer discovery with periodic refresh; `peer_dns_names` accepts multiple DNS names for multi-stack or multi-service discovery. Static `peer_nodes` still works.
 - `common.cache.cluster.memberlist.peer_network_cidrs` filters DNS peer discovery and `advertise_addr: auto` to the selected cache network. Use it in Swarm when `tasks.<service>` can return task IPs from multiple overlay networks.
   The value should come from the cache/discovery network's IPAM subnet, not from
-  every network attached to the task.
+  every network attached to the task. Explicit memberlist `advertise_addr`
+  values and IP-shaped `api.advertise_addr` values must also be inside these
+  CIDRs.
 - `peerDNSName`, `peerIP`, and `peerAddr` are config-template functions
   evaluated by the repository config loader before YAML is decoded. They are not
   env vars, YAML fields, or `cache.Options` members. `peerIP` and `peerAddr` can
