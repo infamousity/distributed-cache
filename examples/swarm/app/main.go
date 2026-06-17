@@ -246,6 +246,9 @@ func defaultPeerDNSName() string {
 	return "tasks." + serviceName
 }
 
+// defaultAdvertiseAddr chooses this task's IP on the same overlay subnet as the
+// peer DNS records. That keeps memberlist and control-plane advertisement on
+// the cache overlay when a Swarm task has more than one network attachment.
 func defaultAdvertiseAddr(peerDNSName string) string {
 	localIPs := localInterfaceIPs()
 	if peerDNSName != "" {

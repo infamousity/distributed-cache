@@ -34,6 +34,10 @@ update `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME` in the StatefulSet.
 what memberlist needs for peer discovery. A normal ClusterIP Service would give
 the load-balanced service endpoint, not the individual cache nodes.
 
+Memberlist advertisement uses `status.podIP` because memberlist requires an IP
+advertise address. The gRPC control-plane advertise address may use pod IP or a
+stable pod DNS name, as long as peer pods can dial it.
+
 The manifest uses canonical config-loader env names:
 
 - `CACHE_CLUSTER_MEMBERLIST_NODE_NAME`

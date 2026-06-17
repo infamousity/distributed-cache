@@ -11,11 +11,12 @@ common:
       tls:
         enabled: false
       memberlist:
+        # bind_address is where this process listens; advertise_addr is the
+        # peer-reachable IP or IP:port other cache nodes should dial.
         node_name: "{{ hostname }}"
         bind_address: "{{ ip }}"
         bind_port: 8946
-        advertise_addr: "{{ hostname }}"
-        advertise_port: 8946
+        advertise_addr: "{{ ip }}:8946"
         peer_dns_name: ""
         peer_dns_names: []
         peer_dns_port: 8946

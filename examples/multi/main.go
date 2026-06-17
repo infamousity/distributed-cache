@@ -32,12 +32,15 @@ func main() {
 	}
 
 	cache, err := dcache.Start(dcache.Options{
-		NodeName:          *nodeName,
-		ControlBindAddr:   *controlAddr,
-		ControlBindPort:   *controlPort,
-		GossipBindAddr:    *gossipAddr,
-		GossipBindPort:    *gossipPort,
-		PeerNodes:         peers,
+		NodeName: *nodeName,
+		// Local nodes bind loopback and use static peer gossip addresses.
+		// In container runtimes, bind and advertise addresses often differ.
+		ControlBindAddr: *controlAddr,
+		ControlBindPort: *controlPort,
+		GossipBindAddr:  *gossipAddr,
+		GossipBindPort:  *gossipPort,
+		PeerNodes:       peers,
+		// All nodes in one cluster must use the same shared key.
 		SharedKey:         "dev-shared-key",
 		ReplicationFactor: 2,
 		CacheSizeBytes:    64 << 20,

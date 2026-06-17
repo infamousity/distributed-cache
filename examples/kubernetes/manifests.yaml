@@ -4,6 +4,8 @@ metadata:
   name: cache-shared-key
 type: Opaque
 stringData:
+  # Replace this development placeholder. Every cache pod in the cluster must
+  # use the same shared key.
   shared-key: replace-with-a-long-random-shared-key
 ---
 apiVersion: v1
@@ -13,6 +15,8 @@ metadata:
   labels:
     app.kubernetes.io/name: distributed-cache-example
 spec:
+  # Headless Service DNS returns individual pod IPs. Memberlist needs pod-level
+  # peer discovery, not a load-balanced ClusterIP.
   clusterIP: None
   publishNotReadyAddresses: true
   selector:
@@ -63,24 +67,32 @@ spec:
               containerPort: 9090
               protocol: TCP
           env:
+            # Pod name is a stable node identity for this StatefulSet member.
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            # Pod IP is the memberlist advertise address. Memberlist requires an
+            # IP advertise address; do not use the headless Service DNS name
+            # here.
             - name: POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
             - name: CACHE_CLUSTER_MEMBERLIST_NODE_NAME
               value: "$(POD_NAME)"
+            # Bind addresses are listener addresses inside the pod.
             - name: CACHE_CLUSTER_MEMBERLIST_BIND_ADDRESS
               value: "0.0.0.0"
             - name: CACHE_CLUSTER_MEMBERLIST_BIND_PORT
               value: "8946"
+            # Advertise addresses are what peer pods dial.
             - name: CACHE_CLUSTER_MEMBERLIST_ADVERTISE_ADDRESS
               value: "$(POD_IP)"
             - name: CACHE_CLUSTER_MEMBERLIST_ADVERTISE_PORT
               value: "8946"
+            # Peer discovery uses headless Service DNS plus the fixed gossip
+            # container port.
             - name: CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME
               value: "cache-peers.default.svc.cluster.local"
             - name: CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT
@@ -89,6 +101,8 @@ spec:
               value: "0.0.0.0"
             - name: CACHE_API_BIND_PORT
               value: "9090"
+            # The control plane can advertise a pod IP:port or a stable pod DNS
+            # name:port, as long as peer pods can dial it.
             - name: CACHE_CONTROL_ADVERTISE_ADDR
               value: "$(POD_IP):9090"
             - name: CACHE_SHARED_KEY
@@ -110,6 +124,8 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+    # Only same-app pods may reach the cache internals. Expose any product API
+    # through a separate Service owned by the host application.
     - from:
         - podSelector:
             matchLabels:

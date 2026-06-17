@@ -11,7 +11,8 @@ import (
 
 func main() {
 	cache, err := dcache.Start(dcache.Options{
-		NodeName:          "single-node",
+		NodeName: "single-node",
+		// Single-node examples can bind loopback and do not need peer discovery.
 		ControlBindAddr:   "127.0.0.1",
 		ControlBindPort:   9090,
 		GossipBindAddr:    "127.0.0.1",

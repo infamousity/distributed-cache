@@ -8,11 +8,67 @@ orchestrator, but every runtime must satisfy the same cluster contract.
 Each cache node needs:
 
 - a stable, unique `NodeName`
-- a peer-reachable memberlist gossip address and port
-- a peer-reachable gRPC control-plane `host:port`
+- a bind address and port for memberlist gossip
+- a peer-reachable memberlist gossip advertise IP and port
+- a bind address and port for the gRPC control plane
+- a peer-reachable gRPC control-plane advertise `host:port`
 - at least one peer discovered through static `PeerNodes` or DNS peer refresh
 - private node-to-node network reachability for memberlist and gRPC traffic
 - the same `SharedKey` on every node
+
+Bind addresses answer "where should this process listen?" Advertise addresses
+answer "what address should peers use to reach this process?" In simple VM or
+host-networked deployments those can be the same address. In Swarm,
+Kubernetes, Podman networks, NAT, and multi-interface hosts, bind and advertise
+often differ.
+
+Memberlist requires its advertise address to be an IP address. DNS names are
+valid for peer discovery and for the gRPC control-plane advertise address, but
+not for memberlist gossip advertisement. `memberlist.advertise_addr` accepts an
+IP or `IP:port`; endpoint form is split internally into memberlist's address
+and port fields.
+
+When using config files, the repository config loader can derive local IPs with
+template helpers:
+
+- `{{ ip }}` selects a local private interface using
+  `bind_address_filter` and `bind_interface_priority`
+- `{{ peerDNSName }}` returns explicit peer DNS env or, in Swarm, derives
+  `tasks.<service>` from `CACHE_RUNTIME=swarm` and
+  `CACHE_SWARM_SERVICE_NAME`
+- `{{ peerIP }}` selects this node's local IPv4 address on the same subnet as
+  the peer DNS records
+- `{{ peerAddr <port> }}` returns `{{ peerIP }}:<port>` and is the preferred
+  helper for endpoint-shaped advertise fields
+
+If `memberlist.advertise_addr` is omitted, memberlist falls back to the
+memberlist bind address. That is only correct when the bind address is a
+specific peer-reachable IP. If the bind address is `0.0.0.0`, set
+`memberlist.advertise_addr` explicitly or use a template helper/runtime field
+that derives the task or pod IP.
+
+If `api.advertise_addr` is omitted, peers use the control-plane bind address
+and port where possible. Set it explicitly when the bind address is wildcard,
+NATed, container-local, or otherwise not the address peers should dial.
+
+Config files merge from left to right. Keep portable defaults in a base config,
+then layer runtime-specific overrides and secrets after it.
+
+Important defaults:
+
+- `size_bytes`: `1073741824` bytes
+- `replication_factor`: `3`
+- `write_concern`: `one`
+- `retry.interval_ms`: `500`
+- `retry.max_attempts`: `3`
+- `retry.queue_size`: `1024`
+- `repair.interval_ms`: `30000`
+- `repair.max_keys_per_cycle`: `1000`
+- `churn.grace_period_ms`: `30000`
+- `peers.refresh_interval_ms`: `30000`
+- `tombstone_ttl_ms`: `300000`
+- `diagnostics.self_check_timeout_ms`: `1000`
+- `diagnostics.peer_warn_interval_ms`: `10000`
 
 Traffic requirements:
 
@@ -45,11 +101,13 @@ Use:
 - `CACHE_CLUSTER_MEMBERLIST_BIND_PORT=<gossip-port>`
 - `CACHE_API_BIND_ADDR=0.0.0.0`
 - `CACHE_API_BIND_PORT=<control-port>`
-- `CACHE_CLUSTER_MEMBERLIST_ADVERTISE_ADDRESS=<task-reachable-ip-or-name>` when
-  auto-detection is not reliable
+- `CACHE_CLUSTER_MEMBERLIST_ADVERTISE_ADDRESS=<task-reachable-ip>` when
+  auto-detection is not reliable; config-file users usually prefer
+  `advertise_addr: "{{ peerAddr <gossip-port> }}"`
 - `CACHE_CLUSTER_MEMBERLIST_ADVERTISE_PORT=<gossip-port>`
 - `CACHE_CONTROL_ADVERTISE_ADDR=<task-reachable-host>:<control-port>` when the
-  bind address is not peer-reachable
+  bind address is not peer-reachable; config-file users usually prefer
+  `advertise_addr: "{{ peerAddr <control-port> }}"` under `common.cache.api`
 
 Network expectations:
 
@@ -67,9 +125,11 @@ When using config files, `peerDNSName`, `peerIP`, and `peerAddr` are
 config-template functions evaluated by the repository config loader before YAML
 is decoded. They are not env vars, YAML fields, or `cache.Options` members.
 `peerDNSName` can fill `peer_dns_name` from explicit peer DNS env or from Swarm
-runtime metadata. `peerIP` and `peerAddr` then derive advertise addresses from
-that effective peer DNS name. See `config.swarm.example.yml` for a complete
-image-oriented profile.
+runtime metadata. `peerAddr` then derives IP endpoint advertise addresses from
+that effective peer DNS name. Memberlist advertise values must resolve to this
+task's peer-reachable IP; DNS names are valid for peer discovery, not memberlist
+advertisement. See `config.swarm.example.yml` for a complete image-oriented
+profile.
 
 ```yaml
 common:
@@ -83,8 +143,7 @@ common:
         node_name: '{{ env "CACHE_CLUSTER_MEMBERLIST_NODE_NAME" }}'
         bind_address: "0.0.0.0"
         bind_port: 8946
-        advertise_addr: "{{ peerIP }}"
-        advertise_port: 8946
+        advertise_addr: "{{ peerAddr 8946 }}"
         peer_dns_name: "{{ peerDNSName }}"
         peer_dns_names: []
         peer_dns_port: 8946
@@ -105,7 +164,8 @@ Use:
 
 - a headless Service for peer DNS
 - StatefulSet pod names when stable identity matters
-- pod IPs or stable pod DNS names as advertised addresses
+- pod IPs as memberlist advertised addresses
+- pod IPs or stable pod DNS names as gRPC control-plane advertised addresses
 - NetworkPolicy to allow cache node-to-node traffic and deny external access to
   gossip/control-plane ports
 
@@ -164,9 +224,9 @@ See `examples/kubernetes/` for an example headless Service, StatefulSet, Secret,
 and NetworkPolicy.
 
 Kubernetes usually has a simpler source of truth for the local pod IP via the
-Downward API, so prefer `status.podIP` for advertised addresses there. `peerIP`
-is still useful for config-file-driven runtimes where the local peer network
-must be inferred from DNS.
+Downward API, so prefer `status.podIP` for memberlist advertise addresses
+there. `peerIP` is still useful for config-file-driven runtimes where the local
+peer network must be inferred from DNS.
 
 ## Podman, Systemd, and VMs
 
@@ -177,8 +237,10 @@ Use:
 - `NodeName` set to a stable hostname or instance ID
 - `PeerNodes` with `host:port` entries, or one or more DNS names that resolve
   to peers
-- `AdvertiseAddr` set to an address other cache nodes can reach
-- `ControlAdvertiseAddr` set to the peer-reachable gRPC `host:port`
+- `AdvertiseAddr` set to an IP address other cache nodes can reach, optionally
+  as `IP:port`
+- `ControlAdvertiseAddr` set to the peer-reachable gRPC `host:port`; DNS is
+  acceptable here when peers can resolve it
 - host firewalls that allow cache traffic only between trusted nodes
 
 Example static config:
@@ -196,8 +258,7 @@ common:
         node_name: "cache-1"
         bind_address: "0.0.0.0"
         bind_port: 8946
-        advertise_addr: "cache-1.internal"
-        advertise_port: 8946
+        advertise_addr: "10.10.1.10:8946"
         peer_nodes:
           - "cache-1.internal:8946"
           - "cache-2.internal:8946"

@@ -117,9 +117,13 @@ common:
 For Swarm-style overlay deployments, use `config.swarm.example.yml` as the
 starting profile. It binds cache internals to `0.0.0.0`, derives `peer_dns_name`
 from explicit peer DNS env or Swarm runtime metadata, and derives peer-reachable
-advertise addresses with `peerIP` / `peerAddr`. Use `peer_dns_names` or
+advertise addresses with `peerAddr`. Use `peer_dns_names` or
 `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES` when discovery must span multiple
 connected stacks.
+
+For the full runtime contract, including required fields, derived advertise
+addresses, bind-address fallbacks, and operational defaults, see
+`docs/runtime-profiles.md`.
 
 For images that bake both configs, run the cache node with the Swarm profile as
 a later override:
@@ -312,12 +316,16 @@ TLS is optional and configured in `common.cache.cluster.tls`. To enable mutual T
 
 - The config `common.cache.api` section now defines the **control-plane** bind address/port.
 - `common.cache.api.advertise_addr` may be set to the peer-reachable `host:port` for the control plane. This is separate from memberlist gossip advertisement and is useful in runtimes where bind and peer-reachable addresses differ.
+- `common.cache.cluster.memberlist.advertise_addr` may be set to a peer-reachable IP or `IP:port`. Endpoint form is normalized internally to memberlist's address and port fields. Memberlist requires an IP advertise address, not a DNS name.
 - `common.cache.cluster.memberlist.peer_dns_name` plus `peer_dns_port` enables generic DNS peer discovery with periodic refresh; `peer_dns_names` accepts multiple DNS names for multi-stack or multi-service discovery. Static `peer_nodes` still works.
 - `peerDNSName`, `peerIP`, and `peerAddr` are config-template functions
   evaluated by the repository config loader before YAML is decoded. They are not
   env vars, YAML fields, or `cache.Options` members. `peerIP` and `peerAddr` can
   also take an explicit DNS name, such as `peerIP "tasks.app"` or
   `peerAddr "tasks.app" 9090`.
+- If `memberlist.advertise_addr` is omitted, memberlist falls back to the
+  memberlist bind address. That is only valid when the bind address is a
+  specific peer-reachable IP, not `0.0.0.0`.
 - `common.cache.churn.grace_period_ms` delays only ownership-loss cleanup during membership churn. Explicit deletes still write tombstones immediately.
 - The library cache data-plane is always in-process; the library does not expose
   an HTTP CRUD API. Host services may expose cache-backed routes as part of their

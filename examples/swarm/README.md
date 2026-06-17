@@ -218,7 +218,7 @@ Important details:
 - The example derives Swarm task-level DNS from `CACHE_RUNTIME=swarm` and
   `CACHE_SWARM_SERVICE_NAME`.
 - `../../config.swarm.example.yml` shows the equivalent config-file profile
-  using `peerDNSName`, `peerIP`, and `peerAddr` for peer discovery and
+  using `peerDNSName` for peer discovery and `peerAddr` for endpoint-shaped
   advertise addresses.
 - The app chooses a container IP on the same subnet as `CACHE_PEER_DNS_NAME`
   results for gossip and control-plane advertisement unless
