@@ -85,6 +85,12 @@ Host services that construct `cache.Options` directly may choose their own env
 mapping. The Swarm example app uses shorter example-local names such as
 `CACHE_NODE_NAME` and `CACHE_GOSSIP_BIND_ADDR`.
 
+Go services that opt into this repository's config shape can call
+`config.Load(...)` from `github.com/infamousity/distributed-cache/config` and
+then pass the result to `cache.StartFromConfig(cfg)`. Services that already own
+their config system can skip this package and call `cache.Start(cache.Options{})`
+directly.
+
 ## Docker Swarm
 
 Swarm works well when each service task is also a cache node.

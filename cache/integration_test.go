@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/infamousity/distributed-cache/config"
 	internalcache "github.com/infamousity/distributed-cache/internal/cache"
-	"github.com/infamousity/distributed-cache/internal/config"
 	"github.com/infamousity/distributed-cache/internal/control"
 	internallog "github.com/infamousity/distributed-cache/internal/log"
 	"github.com/infamousity/distributed-cache/internal/version"
@@ -135,6 +135,13 @@ func TestValidateConfigRejectsInvalidControlAdvertiseAddr(t *testing.T) {
 	cfg.Common.Cache.Control.AdvertiseAddr = "0.0.0.0:9090"
 	if err := validateConfig(cfg, Options{}); err == nil {
 		t.Fatalf("expected wildcard control advertise addr to be rejected")
+	}
+}
+
+func TestStartFromConfigRejectsNil(t *testing.T) {
+	if c, err := StartFromConfig(nil); err == nil {
+		_ = c.Close()
+		t.Fatalf("expected nil config to fail")
 	}
 }
 

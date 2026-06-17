@@ -8,7 +8,7 @@ import (
 
 	"github.com/buraksezer/consistent"
 
-	"github.com/infamousity/distributed-cache/internal/config"
+	"github.com/infamousity/distributed-cache/config"
 )
 
 // Node is the interface your server and cluster code uses to add/remove members

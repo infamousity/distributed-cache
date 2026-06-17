@@ -18,9 +18,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/infamousity/distributed-cache/config"
 	"github.com/infamousity/distributed-cache/internal/cache"
 	"github.com/infamousity/distributed-cache/internal/cluster"
-	"github.com/infamousity/distributed-cache/internal/config"
 	"github.com/infamousity/distributed-cache/internal/control"
 	"github.com/infamousity/distributed-cache/internal/log"
 	"github.com/infamousity/distributed-cache/internal/metrics"
@@ -155,13 +155,20 @@ func Start(opts Options) (*DistributedCache, error) {
 	return startFromConfig(cfg, opts)
 }
 
+func StartFromConfig(cfg *config.Config) (*DistributedCache, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is nil")
+	}
+	opts := optionsFromConfig(cfg).withDefaults()
+	return startFromConfig(cfg, opts)
+}
+
 func StartFromConfigFiles(paths ...string) (*DistributedCache, error) {
 	cfg, err := config.Load(paths...)
 	if err != nil {
 		return nil, err
 	}
-	opts := optionsFromConfig(cfg).withDefaults()
-	return startFromConfig(cfg, opts)
+	return StartFromConfig(cfg)
 }
 
 func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) ([]byte, bool, error) {

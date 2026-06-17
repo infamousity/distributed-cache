@@ -54,6 +54,27 @@ func main() {
 }
 ```
 
+To use this repository's config-file/env loader from a service, load the public
+`config` package and hand the decoded config to the cache package:
+
+```go
+import (
+  dcache "github.com/infamousity/distributed-cache/cache"
+  cacheconfig "github.com/infamousity/distributed-cache/config"
+)
+
+cfg, err := cacheconfig.Load("config.yml", "config.secrets.yml")
+if err != nil {
+  panic(err)
+}
+
+c, err := dcache.StartFromConfig(cfg)
+if err != nil {
+  panic(err)
+}
+defer c.Close()
+```
+
 ### Write Concern
 
 ```go
@@ -113,6 +134,11 @@ common:
   cache:
     shared_key: "${CACHE_SHARED_KEY}"
 ```
+
+If `--config` is omitted, the standalone CLI uses `CACHE_CONFIG` when it is set;
+otherwise it falls back to `config.yml`. `--level` is a process-level log
+override. When it is omitted, the CLI uses `common.cache.log.level` /
+`CACHE_LOG_LEVEL`, then defaults to `info`.
 
 For Swarm-style overlay deployments, use `config.swarm.example.yml` as the
 starting profile. It binds cache internals to `0.0.0.0`, derives `peer_dns_name`

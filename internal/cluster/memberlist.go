@@ -12,7 +12,7 @@ import (
 
 	"github.com/hashicorp/memberlist"
 
-	"github.com/infamousity/distributed-cache/internal/config"
+	"github.com/infamousity/distributed-cache/config"
 	"github.com/infamousity/distributed-cache/internal/log"
 )
 

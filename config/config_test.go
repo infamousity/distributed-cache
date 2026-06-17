@@ -150,6 +150,50 @@ common:
 	}
 }
 
+func TestLoadPrecedenceDefaultsFilesThenEnv(t *testing.T) {
+	t.Setenv("CACHE_CONFIG", "")
+	t.Setenv("CACHE_CLUSTER_MEMBERLIST_NODE_NAME", "env-node")
+
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yml")
+	if err := os.WriteFile(base, []byte(`
+common:
+  cache:
+    cluster:
+      memberlist:
+        node_name: "base-node"
+        bind_port: 1111
+`), 0o600); err != nil {
+		t.Fatalf("write base config: %v", err)
+	}
+	override := filepath.Join(dir, "override.yml")
+	if err := os.WriteFile(override, []byte(`
+common:
+  cache:
+    cluster:
+      memberlist:
+        node_name: "override-node"
+        bind_port: 2222
+`), 0o600); err != nil {
+		t.Fatalf("write override config: %v", err)
+	}
+
+	cfg, err := Load(base, override)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	memberlist := cfg.Common.Cache.Cluster.MemberList
+	if memberlist.NodeName != "env-node" {
+		t.Fatalf("node name = %q, want env-node", memberlist.NodeName)
+	}
+	if memberlist.BindPort != 2222 {
+		t.Fatalf("bind port = %d, want later config file value 2222", memberlist.BindPort)
+	}
+	if memberlist.ReplicationFactor != 3 {
+		t.Fatalf("replication factor = %d, want default 3", memberlist.ReplicationFactor)
+	}
+}
+
 func TestLoadCanonicalMemberlistAdvertiseAddr(t *testing.T) {
 	t.Setenv("CACHE_CONFIG", "")
 
@@ -379,7 +423,7 @@ func TestPeerAddrArgs(t *testing.T) {
 }
 
 func TestSwarmExampleConfigDocumentsTemplateHelpers(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "config.swarm.example.yml"))
+	data, err := os.ReadFile(filepath.Join("..", "config.swarm.example.yml"))
 	if err != nil {
 		t.Fatalf("read swarm config example: %v", err)
 	}

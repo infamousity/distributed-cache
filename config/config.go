@@ -331,13 +331,6 @@ func Load(paths ...string) (*Config, error) {
 		tmp := viper.New()
 		tmp.SetConfigFile(path)
 		tmp.SetConfigType(ext)
-		tmp.AutomaticEnv()
-		tmp.SetEnvPrefix("CACHE")
-		tmp.SetEnvKeyReplacer(dotReplacer)
-
-		if err := internalBinds(tmp); err != nil {
-			return nil, err
-		}
 
 		if err := tmp.ReadInConfig(); err != nil {
 			return nil, fmt.Errorf("read config %s: %w", path, err)
