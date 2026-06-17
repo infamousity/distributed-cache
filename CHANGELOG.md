@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0](https://github.com/infamousity/distributed-cache/compare/v0.1.3...v0.2.0) (2026-06-17)
+
+
+### Features
+
+* **config:** expose public config startup path ([1b6d60d](https://github.com/infamousity/distributed-cache/commit/1b6d60d28bee315de904d75725bef36b00719d77))
+* **config:** normalize memberlist advertise endpoints ([7cda3ec](https://github.com/infamousity/distributed-cache/commit/7cda3ecbd002a3731c9a49b593f6e7cad11f5d96))
+
 ## [0.1.3](https://github.com/infamousity/distributed-cache/compare/v0.1.2...v0.1.3) (2026-06-16)
 
 
