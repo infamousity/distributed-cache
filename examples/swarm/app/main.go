@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +28,15 @@ func main() {
 	peerDNSName := getenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME", getenv("CACHE_PEER_DNS_NAME", defaultPeerDNSName()))
 	peerDNSNames := parseCSV(getenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES", getenv("CACHE_PEER_DNS_NAMES", "")))
 	peerDNSPort := getenvInt("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT", getenvInt("CACHE_PEER_DNS_PORT", gossipPort))
-	advertiseAddr := getenv("CACHE_ADVERTISE_ADDR", defaultAdvertiseAddr(peerDNSName))
+	peerNetworkCIDRs := parseCSV(getenv("CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS", getenv("CACHE_PEER_NETWORK_CIDRS", "")))
+	advertiseAddr := getenv("CACHE_ADVERTISE_ADDR", "")
+	if advertiseAddr == "" {
+		var err error
+		advertiseAddr, err = defaultAdvertiseAddr(peerDNSName, peerNetworkCIDRs)
+		if err != nil {
+			log.Fatalf("derive advertise addr: %v", err)
+		}
+	}
 	controlAdvertiseAddr := getenv("CACHE_CONTROL_ADVERTISE_ADDR", net.JoinHostPort(advertiseAddr, strconv.Itoa(controlPort)))
 	sharedKey := getenv("CACHE_SHARED_KEY", "dev-shared-key")
 	startupWait := time.Duration(getenvInt("CACHE_STARTUP_WAIT_MS", 5000)) * time.Millisecond
@@ -48,6 +57,7 @@ func main() {
 		PeerDNSName:          peerDNSName,
 		PeerDNSNames:         peerDNSNames,
 		PeerDNSPort:          peerDNSPort,
+		PeerNetworkCIDRs:     peerNetworkCIDRs,
 		SharedKey:            sharedKey,
 		ReplicationFactor:    3,
 		CacheSizeBytes:       64 << 20,
@@ -58,7 +68,7 @@ func main() {
 		log.Fatalf("start cache: %v", err)
 	}
 	defer dc.Close()
-	log.Printf("cache advertise gossip=%s:%d control=%s peer_dns=%s peer_dns_names=%v", advertiseAddr, gossipPort, controlAdvertiseAddr, peerDNSName, peerDNSNames)
+	log.Printf("cache advertise gossip=%s:%d control=%s peer_dns=%s peer_dns_names=%v peer_network_cidrs=%v", advertiseAddr, gossipPort, controlAdvertiseAddr, peerDNSName, peerDNSNames, peerNetworkCIDRs)
 
 	go serveHarnessHTTP(harnessHTTPAddr, nodeName, dc, valueTTL)
 
@@ -246,22 +256,22 @@ func defaultPeerDNSName() string {
 	return "tasks." + serviceName
 }
 
-// defaultAdvertiseAddr chooses this task's IP on the same overlay subnet as the
-// peer DNS records. That keeps memberlist and control-plane advertisement on
-// the cache overlay when a Swarm task has more than one network attachment.
-func defaultAdvertiseAddr(peerDNSName string) string {
+// defaultAdvertiseAddr chooses this task's IP on the configured cache network,
+// or falls back to the peer DNS subnet for simple one-overlay examples.
+func defaultAdvertiseAddr(peerDNSName string, peerNetworkCIDRs []string) (string, error) {
 	localIPs := localInterfaceIPs()
+	if len(peerNetworkCIDRs) > 0 {
+		return advertiseAddrForPeerNetworks(peerNetworkCIDRs, localIPs)
+	}
 	if peerDNSName != "" {
-		if ip := advertiseAddrForPeerNetwork(peerDNSName, localIPs); ip != "" {
-			return ip
-		}
+		return advertiseAddrForPeerNetwork(peerDNSName, localIPs)
 	}
 	for _, local := range localIPs {
 		if ip := local.IP.To4(); ip != nil {
-			return ip.String()
+			return ip.String(), nil
 		}
 	}
-	return ""
+	return "", fmt.Errorf("no local IPv4 address available")
 }
 
 func localInterfaceIPs() []*net.IPNet {
@@ -283,12 +293,37 @@ func localInterfaceIPs() []*net.IPNet {
 	return out
 }
 
-func advertiseAddrForPeerNetwork(peerDNSName string, localIPs []*net.IPNet) string {
+func advertiseAddrForPeerNetworks(peerNetworkCIDRs []string, localIPs []*net.IPNet) (string, error) {
+	networks, err := parseCIDRs(peerNetworkCIDRs)
+	if err != nil {
+		return "", err
+	}
+	seen := make(map[string]struct{})
+	for _, local := range localIPs {
+		for _, network := range networks {
+			if network.Contains(local.IP) {
+				seen[local.IP.String()] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return "", fmt.Errorf("no local IPv4 address matched peer network CIDRs")
+	}
+	if len(seen) > 1 {
+		return "", fmt.Errorf("multiple local IPv4 addresses matched peer network CIDRs %v; narrow CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS", sortedKeys(seen))
+	}
+	for ip := range seen {
+		return ip, nil
+	}
+	return "", fmt.Errorf("no local IPv4 address matched peer network CIDRs")
+}
+
+func advertiseAddrForPeerNetwork(peerDNSName string, localIPs []*net.IPNet) (string, error) {
 	peerIPs, err := net.LookupIP(peerDNSName)
 	if err != nil {
-		log.Printf("resolve peer DNS for advertise addr failed: %v", err)
-		return ""
+		return "", err
 	}
+	seen := make(map[string]struct{})
 	for _, peerIP := range peerIPs {
 		peerIPv4 := peerIP.To4()
 		if peerIPv4 == nil {
@@ -296,9 +331,45 @@ func advertiseAddrForPeerNetwork(peerDNSName string, localIPs []*net.IPNet) stri
 		}
 		for _, local := range localIPs {
 			if local.Contains(peerIPv4) {
-				return local.IP.String()
+				seen[local.IP.String()] = struct{}{}
 			}
 		}
 	}
-	return ""
+	if len(seen) == 0 {
+		return "", fmt.Errorf("no local IPv4 address shares a subnet with peer DNS %q", peerDNSName)
+	}
+	if len(seen) > 1 {
+		return "", fmt.Errorf("peer DNS %q matched multiple local IPv4 addresses %v; set CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS", peerDNSName, sortedKeys(seen))
+	}
+	for ip := range seen {
+		return ip, nil
+	}
+	return "", fmt.Errorf("no local IPv4 address shares a subnet with peer DNS %q", peerDNSName)
+}
+
+func parseCIDRs(values []string) ([]*net.IPNet, error) {
+	out := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			_, ipNet, err := net.ParseCIDR(part)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, ipNet)
+		}
+	}
+	return out, nil
+}
+
+func sortedKeys(values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }

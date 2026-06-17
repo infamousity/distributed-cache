@@ -81,6 +81,8 @@ type DistributedCache struct {
 	closed    atomic.Bool
 }
 
+var lookupIPAddr = net.DefaultResolver.LookupIPAddr
+
 type PeerState string
 
 const (
@@ -1740,16 +1742,32 @@ func (d *DistributedCache) resolveDNSPeersForName(ctx context.Context, name stri
 	if port == 0 {
 		return nil, fmt.Errorf("peer DNS port is required")
 	}
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, name)
+	ips, err := lookupIPAddr(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	networks, err := parsePeerNetworkCIDRs(d.opts.PeerNetworkCIDRs)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]string, 0, len(ips))
+	seen := make(map[string]struct{}, len(ips))
 	for _, ip := range ips {
 		if ip.IP == nil {
 			continue
 		}
-		out = append(out, net.JoinHostPort(ip.IP.String(), strconv.Itoa(port)))
+		if !ipInAnyNetwork(ip.IP, networks) {
+			continue
+		}
+		peer := net.JoinHostPort(ip.IP.String(), strconv.Itoa(port))
+		if _, ok := seen[peer]; ok {
+			continue
+		}
+		seen[peer] = struct{}{}
+		out = append(out, peer)
+	}
+	if len(out) == 0 && len(ips) > 0 && len(networks) > 0 {
+		return nil, fmt.Errorf("peer DNS %s resolved %d addresses but none matched peer_network_cidrs", name, len(ips))
 	}
 	return out, nil
 }
@@ -2103,6 +2121,7 @@ func optionsFromConfig(cfg *config.Config) Options {
 		PeerDNSName:                 cfg.Common.Cache.Cluster.MemberList.PeerDNSName,
 		PeerDNSNames:                cfg.Common.Cache.Cluster.MemberList.PeerDNSNames,
 		PeerDNSPort:                 cfg.Common.Cache.Cluster.MemberList.PeerDNSPort,
+		PeerNetworkCIDRs:            cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs,
 		SharedKey:                   cfg.Common.Cache.SharedKey,
 		Namespace:                   cfg.Common.Cache.Namespace,
 		WriteConcern:                parseWriteConcern(cfg.Common.Cache.WriteConcern),
@@ -2170,6 +2189,9 @@ func validateConfig(cfg *config.Config, opts Options) error {
 	if (cfg.Common.Cache.Cluster.MemberList.PeerDNSName != "" || len(cfg.Common.Cache.Cluster.MemberList.PeerDNSNames) > 0) && cfg.Common.Cache.Cluster.MemberList.PeerDNSPort < 0 {
 		return fmt.Errorf("peer_dns_port must be >= 0")
 	}
+	if _, err := parsePeerNetworkCIDRs(cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs); err != nil {
+		return err
+	}
 	if opts.RequireSharedKey && cfg.Common.Cache.SharedKey == "" {
 		return fmt.Errorf("diagnostics.require_shared_key enabled but common.cache.shared_key is empty; set common.cache.shared_key in a later config file such as -c config.yml -c config.secrets.yml, or set CACHE_SHARED_KEY")
 	}
@@ -2197,6 +2219,14 @@ func normalizeMemberlistAdvertise(cfg *config.Config) error {
 	if addr == "" {
 		return nil
 	}
+	if strings.EqualFold(addr, "auto") {
+		ip, err := localAdvertiseIPForMemberlist(cfg)
+		if err != nil {
+			return err
+		}
+		cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = ip
+		return nil
+	}
 	if net.ParseIP(addr) != nil {
 		return nil
 	}
@@ -2220,6 +2250,168 @@ func normalizeMemberlistAdvertise(cfg *config.Config) error {
 		return nil
 	}
 	return fmt.Errorf("invalid memberlist advertise addr %q: %w", addr, err)
+}
+
+func localAdvertiseIPForMemberlist(cfg *config.Config) (string, error) {
+	if len(cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs) > 0 {
+		return localAdvertiseIPForPeerNetworks(cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs)
+	}
+	names := configPeerDNSNames(cfg)
+	if len(names) == 0 {
+		return "", fmt.Errorf("memberlist advertise_addr auto requires peer_network_cidrs or peer_dns_name")
+	}
+	return localAdvertiseIPForPeerDNS(names)
+}
+
+func configPeerDNSNames(cfg *config.Config) []string {
+	names := make([]string, 0, 1+len(cfg.Common.Cache.Cluster.MemberList.PeerDNSNames))
+	seen := make(map[string]struct{}, 1+len(cfg.Common.Cache.Cluster.MemberList.PeerDNSNames))
+	for _, name := range append([]string{cfg.Common.Cache.Cluster.MemberList.PeerDNSName}, cfg.Common.Cache.Cluster.MemberList.PeerDNSNames...) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
+func parsePeerNetworkCIDRs(values []string) ([]*net.IPNet, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			_, ipNet, err := net.ParseCIDR(part)
+			if err != nil {
+				return nil, fmt.Errorf("invalid peer_network_cidrs value %q: %w", part, err)
+			}
+			out = append(out, ipNet)
+		}
+	}
+	return out, nil
+}
+
+func ipInAnyNetwork(ip net.IP, networks []*net.IPNet) bool {
+	if len(networks) == 0 {
+		return true
+	}
+	for _, network := range networks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func localAdvertiseIPForPeerNetworks(values []string) (string, error) {
+	networks, err := parsePeerNetworkCIDRs(values)
+	if err != nil {
+		return "", err
+	}
+	if len(networks) == 0 {
+		return "", fmt.Errorf("memberlist advertise_addr auto requires peer_network_cidrs")
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+	seen := make(map[string]struct{})
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP.IsLoopback() {
+			continue
+		}
+		ip := ipNet.IP.To4()
+		if ip == nil || !ipInAnyNetwork(ip, networks) {
+			continue
+		}
+		seen[ip.String()] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return "", fmt.Errorf("memberlist advertise_addr auto found no local IPv4 address matching peer_network_cidrs")
+	}
+	if len(seen) > 1 {
+		ips := make([]string, 0, len(seen))
+		for ip := range seen {
+			ips = append(ips, ip)
+		}
+		sort.Strings(ips)
+		return "", fmt.Errorf("memberlist advertise_addr auto matched multiple local IPv4 addresses %v; narrow peer_network_cidrs", ips)
+	}
+	for ip := range seen {
+		return ip, nil
+	}
+	return "", fmt.Errorf("memberlist advertise_addr auto found no local IPv4 address matching peer_network_cidrs")
+}
+
+func localAdvertiseIPForPeerDNS(names []string) (string, error) {
+	localNets, err := localIPv4Networks()
+	if err != nil {
+		return "", err
+	}
+	seen := make(map[string]struct{})
+	for _, name := range names {
+		ips, err := net.LookupIP(name)
+		if err != nil {
+			return "", fmt.Errorf("resolve peer DNS %s for memberlist advertise_addr auto: %w", name, err)
+		}
+		for _, peerIP := range ips {
+			peerIPv4 := peerIP.To4()
+			if peerIPv4 == nil {
+				continue
+			}
+			for _, local := range localNets {
+				if local.Contains(peerIPv4) {
+					seen[local.IP.String()] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return "", fmt.Errorf("memberlist advertise_addr auto found no local IPv4 address sharing a subnet with peer DNS")
+	}
+	if len(seen) > 1 {
+		ips := make([]string, 0, len(seen))
+		for ip := range seen {
+			ips = append(ips, ip)
+		}
+		sort.Strings(ips)
+		return "", fmt.Errorf("memberlist advertise_addr auto matched multiple local IPv4 addresses %v; set peer_network_cidrs to choose the cache network", ips)
+	}
+	for ip := range seen {
+		return ip, nil
+	}
+	return "", fmt.Errorf("memberlist advertise_addr auto found no local IPv4 address sharing a subnet with peer DNS")
+}
+
+func localIPv4Networks() ([]*net.IPNet, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*net.IPNet, 0, len(addrs))
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP.IsLoopback() {
+			continue
+		}
+		ip := ipNet.IP.To4()
+		if ip == nil {
+			continue
+		}
+		out = append(out, &net.IPNet{IP: ip, Mask: ipNet.Mask})
+	}
+	return out, nil
 }
 
 func ensureSharedKey(cfg *config.Config, opts *Options, logger log.Interface) error {

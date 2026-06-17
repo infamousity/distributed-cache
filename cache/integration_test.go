@@ -221,6 +221,92 @@ func TestNormalizeMemberlistAdvertiseAddr(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsInvalidPeerNetworkCIDR(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs = []string{"not-a-cidr"}
+	if err := validateConfig(cfg, Options{}); err == nil {
+		t.Fatalf("expected invalid peer_network_cidrs to fail validation")
+	}
+}
+
+func TestNormalizeMemberlistAdvertiseAutoRequiresPeerNetworkCIDR(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Common.Cache.Cluster.MemberList.AdvertiseAddr = "auto"
+	if err := normalizeMemberlistAdvertise(cfg); err == nil {
+		t.Fatalf("expected auto advertise without peer_network_cidrs to fail")
+	}
+}
+
+func TestPeerNetworkCIDRFiltering(t *testing.T) {
+	networks, err := parsePeerNetworkCIDRs([]string{"10.0.7.0/24, 10.0.8.0/24"})
+	if err != nil {
+		t.Fatalf("parse peer networks: %v", err)
+	}
+	if !ipInAnyNetwork(net.ParseIP("10.0.7.12"), networks) {
+		t.Fatalf("expected 10.0.7.12 to match peer networks")
+	}
+	if ipInAnyNetwork(net.ParseIP("10.0.9.12"), networks) {
+		t.Fatalf("expected 10.0.9.12 to be filtered out")
+	}
+}
+
+func TestResolveDNSPeersFiltersPeerNetworkCIDRs(t *testing.T) {
+	originalLookup := lookupIPAddr
+	lookupIPAddr = func(ctx context.Context, name string) ([]net.IPAddr, error) {
+		if name != "tasks.cache" {
+			t.Fatalf("lookup name = %q", name)
+		}
+		return []net.IPAddr{
+			{IP: net.ParseIP("10.0.7.11")},
+			{IP: net.ParseIP("10.0.8.11")},
+			{IP: net.ParseIP("10.0.7.12")},
+		}, nil
+	}
+	defer func() {
+		lookupIPAddr = originalLookup
+	}()
+
+	c := &DistributedCache{opts: Options{
+		PeerDNSName:      "tasks.cache",
+		PeerDNSPort:      8946,
+		GossipBindPort:   8946,
+		PeerNetworkCIDRs: []string{"10.0.7.0/24"},
+	}}
+	peers, err := c.resolveDNSPeers(context.Background())
+	if err != nil {
+		t.Fatalf("resolveDNSPeers: %v", err)
+	}
+	want := []string{"10.0.7.11:8946", "10.0.7.12:8946"}
+	if len(peers) != len(want) {
+		t.Fatalf("peers = %#v, want %#v", peers, want)
+	}
+	for i := range want {
+		if peers[i] != want[i] {
+			t.Fatalf("peers = %#v, want %#v", peers, want)
+		}
+	}
+}
+
+func TestResolveDNSPeersFailsWhenNoAddressMatchesPeerNetworkCIDRs(t *testing.T) {
+	originalLookup := lookupIPAddr
+	lookupIPAddr = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("10.0.8.11")}}, nil
+	}
+	defer func() {
+		lookupIPAddr = originalLookup
+	}()
+
+	c := &DistributedCache{opts: Options{
+		PeerDNSName:      "tasks.cache",
+		PeerDNSPort:      8946,
+		GossipBindPort:   8946,
+		PeerNetworkCIDRs: []string{"10.0.7.0/24"},
+	}}
+	if _, err := c.resolveDNSPeers(context.Background()); err == nil {
+		t.Fatalf("expected no matching peer network address to fail")
+	}
+}
+
 func TestControlAdvertiseAddrSetsSelfForwardAddress(t *testing.T) {
 	controlPort := getFreePort(t)
 	controlAddr := fmt.Sprintf("127.0.0.1:%d", controlPort)

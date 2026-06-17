@@ -26,6 +26,7 @@ type Options struct {
 	PeerDNSName                 string
 	PeerDNSNames                []string
 	PeerDNSPort                 int
+	PeerNetworkCIDRs            []string
 	PeerRefreshInterval         time.Duration
 	SharedKey                   string
 	PartitionCount              int

@@ -22,6 +22,7 @@ func TestLoadBindsCacheEnvOnlyDeploymentFields(t *testing.T) {
 	t.Setenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME", "tasks.cache")
 	t.Setenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES", "tasks.auth,tasks.user")
 	t.Setenv("CACHE_CLUSTER_MEMBERLIST_PEER_DNS_PORT", "8946")
+	t.Setenv("CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS", "10.0.7.0/24,10.0.8.0/24")
 	t.Setenv("CACHE_CLUSTER_MEMBERLIST_PARTITION_COUNT", "509")
 	t.Setenv("CACHE_REPLICATION_FACTOR", "5")
 	t.Setenv("CACHE_PEERS_REFRESH_INTERVAL_MS", "15000")
@@ -59,6 +60,9 @@ func TestLoadBindsCacheEnvOnlyDeploymentFields(t *testing.T) {
 		memberlist.PeerDNSNames[0] != "tasks.auth" ||
 		memberlist.PeerDNSNames[1] != "tasks.user" ||
 		memberlist.PeerDNSPort != 8946 ||
+		len(memberlist.PeerNetworkCIDRs) != 2 ||
+		memberlist.PeerNetworkCIDRs[0] != "10.0.7.0/24" ||
+		memberlist.PeerNetworkCIDRs[1] != "10.0.8.0/24" ||
 		memberlist.PartitionCount != 509 ||
 		memberlist.ReplicationFactor != 5 {
 		t.Fatalf("unexpected memberlist config: %+v", memberlist)
@@ -430,9 +434,9 @@ func TestSwarmExampleConfigDocumentsTemplateHelpers(t *testing.T) {
 	text := string(data)
 	for _, want := range []string{
 		"peerDNSName, peerIP, and peerAddr are config-template functions",
-		`advertise_addr: "{{ peerAddr 9090 }}"`,
-		`advertise_addr: "{{ peerAddr 8946 }}"`,
+		`advertise_addr: auto`,
 		`peer_dns_name: "{{ peerDNSName }}"`,
+		`peer_network_cidrs: []`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config.swarm.example.yml missing %q", want)

@@ -1,0 +1,97 @@
+version: '3.9'
+
+x-cache-env: &cache-env
+  CACHE_RUNTIME: swarm
+  CACHE_HARNESS_HTTP_BIND_ADDR: ":8080"
+  CACHE_CONTROL_BIND_ADDR: "0.0.0.0"
+  CACHE_CONTROL_BIND_PORT: 9090
+  CACHE_GOSSIP_BIND_ADDR: "0.0.0.0"
+  CACHE_GOSSIP_BIND_PORT: 8946
+  CACHE_PEER_DNS_PORT: 8946
+  CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS: "${CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS:-10.250.70.0/24}"
+  CACHE_SHARED_KEY: dev-shared-key
+  CACHE_TOMBSTONE_TTL_MS: 300000
+  CACHE_VALUE_TTL_MS: 600000
+  CACHE_STARTUP_WAIT_MS: 5000
+  CACHE_DIAGNOSTICS_MIN_READY_PEERS: 2
+
+x-placement: &placement
+  mode: replicated
+  replicas: 1
+  placement:
+    constraints:
+      - ${PLACEMENT_CONSTRAINT:-node.platform.os == linux}
+
+services:
+  app_a:
+    image: distributed-cache-example-app:latest
+    networks:
+      - cache_control
+      - overlay_ab
+    deploy: *placement
+    environment:
+      <<: *cache-env
+      CACHE_SWARM_SERVICE_NAME: "{{.Service.Name}}"
+      CACHE_NODE_NAME: "{{.Task.Name}}"
+      CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES: "tasks.${STACK_NAME:-dc-multinet-test}_app_a,tasks.${STACK_NAME:-dc-multinet-test}_app_b,tasks.${STACK_NAME:-dc-multinet-test}_app_c"
+
+  app_b:
+    image: distributed-cache-example-app:latest
+    networks:
+      - cache_control
+      - overlay_ab
+      - overlay_bc
+    deploy: *placement
+    environment:
+      <<: *cache-env
+      CACHE_SWARM_SERVICE_NAME: "{{.Service.Name}}"
+      CACHE_NODE_NAME: "{{.Task.Name}}"
+      CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES: "tasks.${STACK_NAME:-dc-multinet-test}_app_a,tasks.${STACK_NAME:-dc-multinet-test}_app_b,tasks.${STACK_NAME:-dc-multinet-test}_app_c"
+
+  app_c:
+    image: distributed-cache-example-app:latest
+    networks:
+      - cache_control
+      - overlay_bc
+    deploy: *placement
+    environment:
+      <<: *cache-env
+      CACHE_SWARM_SERVICE_NAME: "{{.Service.Name}}"
+      CACHE_NODE_NAME: "{{.Task.Name}}"
+      CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES: "tasks.${STACK_NAME:-dc-multinet-test}_app_a,tasks.${STACK_NAME:-dc-multinet-test}_app_b,tasks.${STACK_NAME:-dc-multinet-test}_app_c"
+
+  harness:
+    image: distributed-cache-example-app:latest
+    networks:
+      - cache_control
+    command: ["sh", "-c", "while true; do sleep 3600; done"]
+    deploy: *placement
+
+networks:
+  cache_control:
+    driver: overlay
+    attachable: false
+    internal: true
+    ipam:
+      config:
+        - subnet: "${CACHE_CONTROL_SUBNET:-10.250.70.0/24}"
+    driver_opts:
+      encrypted: "true"
+  overlay_ab:
+    driver: overlay
+    attachable: false
+    internal: true
+    ipam:
+      config:
+        - subnet: "${OVERLAY_AB_SUBNET:-10.250.71.0/24}"
+    driver_opts:
+      encrypted: "true"
+  overlay_bc:
+    driver: overlay
+    attachable: false
+    internal: true
+    ipam:
+      config:
+        - subnet: "${OVERLAY_BC_SUBNET:-10.250.72.0/24}"
+    driver_opts:
+      encrypted: "true"

@@ -143,9 +143,11 @@ override. When it is omitted, the CLI uses `common.cache.log.level` /
 For Swarm-style overlay deployments, use `config.swarm.example.yml` as the
 starting profile. It binds cache internals to `0.0.0.0`, derives `peer_dns_name`
 from explicit peer DNS env or Swarm runtime metadata, and derives peer-reachable
-advertise addresses with `peerAddr`. Use `peer_dns_names` or
+memberlist advertisement with `advertise_addr: auto`. Use `peer_dns_names` or
 `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAMES` when discovery must span multiple
-connected stacks.
+connected stacks. If a task is attached to more than one overlay network, set
+`peer_network_cidrs` / `CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS` to the cache
+overlay CIDR so DNS peer discovery ignores addresses from non-cache networks.
 
 For the full runtime contract, including required fields, derived advertise
 addresses, bind-address fallbacks, and operational defaults, see
@@ -243,7 +245,8 @@ Runtime-specific notes:
   `PeerDNSNames` with each stack's `tasks.<service>` name. Put gossip and gRPC
   control-plane traffic on an internal overlay network. If the overlay is
   multi-host, allow both TCP and UDP on the gossip port and TCP on the
-  control-plane port between tasks.
+  control-plane port between tasks. When services share more than one overlay,
+  configure `peer_network_cidrs` so only the cache overlay addresses are joined.
 - **Kubernetes:** prefer a headless Service for DNS peer discovery and set
   advertised addresses to pod-reachable IPs or stable DNS names. NetworkPolicy
   should allow TCP/UDP gossip between pods and TCP gRPC control-plane traffic
@@ -343,7 +346,9 @@ TLS is optional and configured in `common.cache.cluster.tls`. To enable mutual T
 - The config `common.cache.api` section now defines the **control-plane** bind address/port.
 - `common.cache.api.advertise_addr` may be set to the peer-reachable `host:port` for the control plane. This is separate from memberlist gossip advertisement and is useful in runtimes where bind and peer-reachable addresses differ.
 - `common.cache.cluster.memberlist.advertise_addr` may be set to a peer-reachable IP or `IP:port`. Endpoint form is normalized internally to memberlist's address and port fields. Memberlist requires an IP advertise address, not a DNS name.
+- `common.cache.cluster.memberlist.advertise_addr: auto` derives the local memberlist advertise IP from `peer_network_cidrs`, or from `peer_dns_name` when that resolves to exactly one matching local network.
 - `common.cache.cluster.memberlist.peer_dns_name` plus `peer_dns_port` enables generic DNS peer discovery with periodic refresh; `peer_dns_names` accepts multiple DNS names for multi-stack or multi-service discovery. Static `peer_nodes` still works.
+- `common.cache.cluster.memberlist.peer_network_cidrs` filters DNS peer discovery and `advertise_addr: auto` to the selected cache network. Use it in Swarm when `tasks.<service>` can return task IPs from multiple overlay networks.
 - `peerDNSName`, `peerIP`, and `peerAddr` are config-template functions
   evaluated by the repository config loader before YAML is decoded. They are not
   env vars, YAML fields, or `cache.Options` members. `peerIP` and `peerAddr` can

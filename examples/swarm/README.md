@@ -218,12 +218,12 @@ Important details:
 - The example derives Swarm task-level DNS from `CACHE_RUNTIME=swarm` and
   `CACHE_SWARM_SERVICE_NAME`.
 - `../../config.swarm.example.yml` shows the equivalent config-file profile
-  using `peerDNSName` for peer discovery and `peerAddr` for endpoint-shaped
-  advertise addresses.
-- The app chooses a container IP on the same subnet as `CACHE_PEER_DNS_NAME`
-  results for gossip and control-plane advertisement unless
-  `CACHE_ADVERTISE_ADDR` or `CACHE_CONTROL_ADVERTISE_ADDR` is set. This matters
-  when a task is attached to more than one network.
+  using `peerDNSName` for peer discovery and `advertise_addr: auto` for
+  memberlist advertisement.
+- The app chooses a container IP from
+  `CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS` when set, otherwise it can derive
+  one from `CACHE_PEER_DNS_NAME` for simple one-overlay examples. Set the peer
+  network CIDR when a task is attached to more than one overlay network.
 - The `cache_control` network is internal, encrypted, and not attachable. The
   proof harness runs as a Swarm service on that overlay instead of creating
   one-shot containers or publishing host ports.

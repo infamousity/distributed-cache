@@ -6,6 +6,9 @@
 #   discovery, set peer_dns_names to a list of tasks.<service> names.
 # - peerIP selects this task's local IPv4 address on the peer DNS subnet.
 # - peerAddr returns that IP as host:port for endpoint-shaped advertise fields.
+# For multi-overlay Swarm services, set peer_network_cidrs to the cache overlay
+# subnet. DNS peer discovery and advertise_addr: auto will then use only that
+# network instead of every IP returned by tasks.<service>.
 # Bind addresses are listener addresses. Advertise addresses are what peers
 # dial, so memberlist advertise_addr must resolve to this task's overlay IP.
 common:
@@ -16,7 +19,6 @@ common:
     api:
       bind_addr: "0.0.0.0"
       bind_port: 9090
-      advertise_addr: "{{ peerAddr 9090 }}"
     cluster:
       tls:
         enabled: false
@@ -24,10 +26,14 @@ common:
         node_name: '{{ env "CACHE_CLUSTER_MEMBERLIST_NODE_NAME" }}'
         bind_address: "0.0.0.0"
         bind_port: 8946
-        advertise_addr: "{{ peerAddr 8946 }}"
+        # "auto" derives this task's peer-reachable gossip IP. With one
+        # matching overlay it can use peer_dns_name; with multiple overlays,
+        # set peer_network_cidrs so startup can choose the cache network.
+        advertise_addr: auto
         peer_dns_name: "{{ peerDNSName }}"
         peer_dns_names: []
         peer_dns_port: 8946
+        peer_network_cidrs: []
         replication_factor: 3
     peers:
       refresh_interval_ms: 30000

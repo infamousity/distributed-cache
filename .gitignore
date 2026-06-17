@@ -13,6 +13,7 @@
 !.github/CODEOWNERS
 !examples/kubernetes/*.yaml
 !examples/swarm/docker-stack.yml
+!examples/swarm/docker-stack.multi-network.yml
 !LICENSE
 !.release-please-manifest.json
 !config.yml

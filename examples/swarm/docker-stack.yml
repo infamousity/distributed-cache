@@ -21,14 +21,16 @@ services:
       # Harness HTTP is example-only and stays on the private overlay.
       CACHE_HARNESS_HTTP_BIND_ADDR: ":8080"
       # Bind addresses are listener addresses inside the container. The app
-      # derives peer-reachable advertise IPs from tasks.<service> DNS unless
-      # CACHE_ADVERTISE_ADDR or CACHE_CONTROL_ADVERTISE_ADDR is set.
+      # derives peer-reachable advertise IPs from tasks.<service> DNS in this
+      # one-overlay example. If the service joins multiple overlays, set
+      # CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS to the cache overlay CIDR.
       CACHE_CONTROL_BIND_ADDR: "0.0.0.0"
       CACHE_CONTROL_BIND_PORT: 9090
       CACHE_GOSSIP_BIND_ADDR: "0.0.0.0"
       CACHE_GOSSIP_BIND_PORT: 8946
       # Peer DNS port is the fixed container gossip port used for memberlist.
       CACHE_PEER_DNS_PORT: 8946
+      CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS: "${CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS:-}"
       # Development-only key. Production deployments should inject a generated
       # secret and use the same value on every cache node.
       CACHE_SHARED_KEY: dev-shared-key

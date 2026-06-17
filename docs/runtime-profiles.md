@@ -107,13 +107,15 @@ Use:
 - `CACHE_CLUSTER_MEMBERLIST_BIND_PORT=<gossip-port>`
 - `CACHE_API_BIND_ADDR=0.0.0.0`
 - `CACHE_API_BIND_PORT=<control-port>`
-- `CACHE_CLUSTER_MEMBERLIST_ADVERTISE_ADDRESS=<task-reachable-ip>` when
-  auto-detection is not reliable; config-file users usually prefer
-  `advertise_addr: "{{ peerAddr <gossip-port> }}"`
+- `CACHE_CLUSTER_MEMBERLIST_ADVERTISE_ADDRESS=<task-reachable-ip>` when you want
+  to set the gossip advertise IP explicitly; config-file users can set
+  `advertise_addr: auto`
 - `CACHE_CLUSTER_MEMBERLIST_ADVERTISE_PORT=<gossip-port>`
+- `CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS=<cache-overlay-cidr>` when tasks
+  are attached to more than one overlay network
 - `CACHE_CONTROL_ADVERTISE_ADDR=<task-reachable-host>:<control-port>` when the
-  bind address is not peer-reachable; config-file users usually prefer
-  `advertise_addr: "{{ peerAddr <control-port> }}"` under `common.cache.api`
+  control plane must advertise something different from the memberlist advertise
+  IP plus `CACHE_API_BIND_PORT`
 
 Network expectations:
 
@@ -126,6 +128,15 @@ Network expectations:
 Swarm DNS note: `tasks.<service>` returns task IPs instead of the service VIP.
 That is the right peer discovery shape because peers must discover
 individual cache nodes, not only the load-balanced service endpoint.
+
+If services are attached to multiple overlay networks, the same `tasks.<service>`
+name can return one task IP per shared overlay. Configure
+`peer_network_cidrs`/`CACHE_CLUSTER_MEMBERLIST_PEER_NETWORK_CIDRS` with the cache
+overlay subnet in that case. The filter is applied to DNS peer discovery before
+memberlist join, and `advertise_addr: auto` uses the same filter to choose this
+task's gossip advertise IP. Without the filter, `advertise_addr: auto` only
+succeeds when peer DNS maps to exactly one local network; ambiguous multi-overlay
+matches fail at startup.
 
 When using config files, `peerDNSName`, `peerIP`, and `peerAddr` are
 config-template functions evaluated by the repository config loader before YAML
@@ -143,23 +154,25 @@ common:
     api:
       bind_addr: "0.0.0.0"
       bind_port: 9090
-      advertise_addr: "{{ peerAddr 9090 }}"
     cluster:
       memberlist:
         node_name: '{{ env "CACHE_CLUSTER_MEMBERLIST_NODE_NAME" }}'
         bind_address: "0.0.0.0"
         bind_port: 8946
-        advertise_addr: "{{ peerAddr 8946 }}"
+        advertise_addr: auto
         peer_dns_name: "{{ peerDNSName }}"
         peer_dns_names: []
         peer_dns_port: 8946
+        peer_network_cidrs: []
 ```
 
 `peerDNSName` prefers explicit `CACHE_CLUSTER_MEMBERLIST_PEER_DNS_NAME` or
 `CACHE_PEER_DNS_NAME`. With `CACHE_RUNTIME=swarm`, it can derive
 `tasks.<service>` from `CACHE_SWARM_SERVICE_NAME`. `peerIP` selects this node's
-local IPv4 address on the same subnet as the resolved peer DNS records. This is
-safer than `ip` when a task is attached to multiple networks.
+local IPv4 address on the same subnet as the resolved peer DNS records. It is
+useful for simple deployments and explicit templates, but `advertise_addr: auto`
+plus `peer_network_cidrs` is the safer Swarm shape when tasks can share multiple
+overlay networks.
 
 ## Kubernetes
 

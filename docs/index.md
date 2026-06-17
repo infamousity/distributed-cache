@@ -157,6 +157,8 @@ Key points:
 - use `tasks.<service>` for peer discovery, or `peer_dns_names` when peers span
   multiple connected stacks or services
 - bind gossip and control-plane listeners inside an internal overlay
+- set `peer_network_cidrs` when a task shares more than one overlay, so DNS
+  discovery joins only cache-network task IPs
 - allow both TCP and UDP gossip traffic between tasks
 - allow TCP gRPC control-plane traffic between tasks
 - keep the public service API separate from cache internals
