@@ -19,8 +19,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
 
-      - run: go test ./...
+      - run: go test -vet=off ./...
       - run: go vet ./...
 
       - name: Create Go prerelease tag
