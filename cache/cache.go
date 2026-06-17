@@ -892,6 +892,9 @@ func (d *DistributedCache) replicateWithQuorum(ctx context.Context, key string, 
 	expiresAt := expiresAtForTTL(ttl)
 	resultCh := make(chan bool, len(members))
 	var wg sync.WaitGroup
+	var ackCount atomic.Int32
+	var quorumReached atomic.Bool
+	ackCount.Store(1)
 	for _, member := range members {
 		if member == self {
 			continue
@@ -915,6 +918,9 @@ func (d *DistributedCache) replicateWithQuorum(ctx context.Context, key string, 
 			cctx, cancel := d.withTimeout(ctx)
 			if err := client.StoreVersioned(cctx, key, value, ttl, version, control.WriteConcernReplica); err != nil {
 				cancel()
+				if suppressPostQuorumCanceled(err, &quorumReached) {
+					return
+				}
 				d.handlePeerError(addr, "replicate-quorum", err)
 				d.enqueueRetry(retryTask{kind: retryStore, addr: addr, key: key, value: value, ttl: ttl, expiresAt: expiresAt, version: version, attempts: 1})
 				if d.metrics != nil {
@@ -925,6 +931,9 @@ func (d *DistributedCache) replicateWithQuorum(ctx context.Context, key string, 
 			cancel()
 			if d.metrics != nil {
 				d.metrics.ReplicationSuccess.Inc()
+			}
+			if int(ackCount.Add(1)) >= quorum {
+				quorumReached.Store(true)
 			}
 			resultCh <- true
 		}(addr)
@@ -955,6 +964,9 @@ func (d *DistributedCache) replicateDeleteWithQuorum(ctx context.Context, key st
 	self := d.cluster.GetNode().GetSelf()
 	resultCh := make(chan bool, len(members))
 	var wg sync.WaitGroup
+	var ackCount atomic.Int32
+	var quorumReached atomic.Bool
+	ackCount.Store(1)
 	for _, member := range members {
 		if member == self {
 			continue
@@ -978,6 +990,9 @@ func (d *DistributedCache) replicateDeleteWithQuorum(ctx context.Context, key st
 			cctx, cancel := d.withTimeout(ctx)
 			if err := client.DeleteVersioned(cctx, key, version, control.WriteConcernReplica); err != nil {
 				cancel()
+				if suppressPostQuorumCanceled(err, &quorumReached) {
+					return
+				}
 				d.handlePeerError(addr, "replicate-delete-quorum", err)
 				d.enqueueRetry(retryTask{kind: retryDelete, addr: addr, key: key, version: version, attempts: 1})
 				if d.metrics != nil {
@@ -988,6 +1003,9 @@ func (d *DistributedCache) replicateDeleteWithQuorum(ctx context.Context, key st
 			cancel()
 			if d.metrics != nil {
 				d.metrics.ReplicationSuccess.Inc()
+			}
+			if int(ackCount.Add(1)) >= quorum {
+				quorumReached.Store(true)
 			}
 			resultCh <- true
 		}(addr)
@@ -1003,6 +1021,19 @@ func (d *DistributedCache) replicateDeleteWithQuorum(ctx context.Context, key st
 		}
 	}
 	return fmt.Errorf("delete quorum not reached: %d/%d", acks, quorum)
+}
+
+func suppressPostQuorumCanceled(err error, quorumReached *atomic.Bool) bool {
+	if err == nil || quorumReached == nil || !quorumReached.Load() {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if s, ok := status.FromError(err); ok && s.Code() == codes.Canceled {
+		return true
+	}
+	return false
 }
 
 func (d *DistributedCache) clientFor(addr string) (*control.Client, error) {

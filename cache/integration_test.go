@@ -25,6 +25,8 @@ import (
 	"github.com/infamousity/distributed-cache/internal/control"
 	internallog "github.com/infamousity/distributed-cache/internal/log"
 	"github.com/infamousity/distributed-cache/internal/version"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func testVersion(physical int64, nodeID string) version.Version {
@@ -340,6 +342,40 @@ func TestResolveDNSPeersFailsWhenNoAddressMatchesPeerNetworkCIDRs(t *testing.T) 
 	}}
 	if _, err := c.resolveDNSPeers(context.Background()); err == nil {
 		t.Fatalf("expected no matching peer network address to fail")
+	}
+}
+
+func TestSuppressPostQuorumCanceled(t *testing.T) {
+	var quorumReached atomic.Bool
+	if suppressPostQuorumCanceled(context.Canceled, &quorumReached) {
+		t.Fatalf("pre-quorum context.Canceled should not be suppressed")
+	}
+	quorumReached.Store(true)
+	if !suppressPostQuorumCanceled(context.Canceled, &quorumReached) {
+		t.Fatalf("post-quorum context.Canceled should be suppressed")
+	}
+	if !suppressPostQuorumCanceled(status.Error(codes.Canceled, "caller canceled"), &quorumReached) {
+		t.Fatalf("post-quorum grpc canceled should be suppressed")
+	}
+	if suppressPostQuorumCanceled(context.DeadlineExceeded, &quorumReached) {
+		t.Fatalf("deadline exceeded should not be suppressed")
+	}
+	if suppressPostQuorumCanceled(errors.New("connection refused"), &quorumReached) {
+		t.Fatalf("ordinary peer errors should not be suppressed")
+	}
+}
+
+func TestQuorumReachedMarkedBySuccessfulReplicaBeforeResultConsumed(t *testing.T) {
+	quorum := 2
+	var ackCount atomic.Int32
+	var quorumReached atomic.Bool
+	ackCount.Store(1)
+
+	if int(ackCount.Add(1)) >= quorum {
+		quorumReached.Store(true)
+	}
+	if !suppressPostQuorumCanceled(context.Canceled, &quorumReached) {
+		t.Fatalf("post-quorum cancellation should be suppressed as soon as replica success reaches quorum")
 	}
 }
 
