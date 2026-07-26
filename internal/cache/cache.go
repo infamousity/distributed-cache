@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -34,6 +35,24 @@ type entryMeta struct {
 	version   version.Version
 	tombstone bool
 	expiresAt time.Time
+}
+
+var ErrStaleVersion = errors.New("stale cache version")
+
+type StaleVersionError struct {
+	Current version.Version
+}
+
+func (e *StaleVersionError) Error() string {
+	return fmt.Sprintf("%s: current version is %s", ErrStaleVersion, e.Current)
+}
+
+func (e *StaleVersionError) Unwrap() error {
+	return ErrStaleVersion
+}
+
+func (e *StaleVersionError) CurrentVersion() version.Version {
+	return e.Current
 }
 
 func NewStore(maxCost int64) (*Store, error) {
@@ -88,6 +107,9 @@ func (s *Store) GetEntry(key string) (Entry, bool) {
 	}
 	entry, ok := s.cache.Get(key)
 	if !ok {
+		if metaOK {
+			delete(s.meta, key)
+		}
 		return Entry{}, false
 	}
 	if metaOK {
@@ -103,6 +125,10 @@ func (s *Store) Set(key string, value []byte, ttl time.Duration) bool {
 }
 
 func (s *Store) SetVersioned(key string, value []byte, ttl time.Duration, version version.Version) bool {
+	return s.ApplyVersioned(key, value, ttl, version) == nil
+}
+
+func (s *Store) ApplyVersioned(key string, value []byte, ttl time.Duration, version version.Version) error {
 	return s.put(key, Entry{
 		Value:   cloneBytes(value),
 		Version: version,
@@ -110,13 +136,17 @@ func (s *Store) SetVersioned(key string, value []byte, ttl time.Duration, versio
 }
 
 func (s *Store) DeleteVersioned(key string, version version.Version, tombstoneTTL time.Duration) bool {
+	return s.ApplyDeleteVersioned(key, version, tombstoneTTL) == nil
+}
+
+func (s *Store) ApplyDeleteVersioned(key string, version version.Version, tombstoneTTL time.Duration) error {
 	return s.put(key, Entry{
 		Version:   version,
 		Tombstone: true,
 	}, tombstoneTTL)
 }
 
-func (s *Store) put(key string, entry Entry, ttl time.Duration) bool {
+func (s *Store) put(key string, entry Entry, ttl time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
@@ -127,12 +157,12 @@ func (s *Store) put(key string, entry Entry, ttl time.Duration) bool {
 		expiresAt: expiresAtForTTL(now, ttl),
 	}
 	if current, ok := s.meta[key]; ok && metaIsOlder(nextMeta, current) {
-		return true
+		return &StaleVersionError{Current: current.version}
 	}
 	if _, ok := s.meta[key]; !ok && len(s.meta) >= s.maxMetaEntries {
-		s.cleanupSomeExpiredLocked(now)
+		s.cleanupSomeMetadataLocked(now, true)
 		if len(s.meta) >= s.maxMetaEntries {
-			return false
+			return fmt.Errorf("cache metadata capacity reached")
 		}
 	}
 	cost := int64(len(entry.Value))
@@ -151,9 +181,12 @@ func (s *Store) put(key string, entry Entry, ttl time.Duration) bool {
 		if entry.Version.Compare(s.lastVersion) > 0 {
 			s.lastVersion = entry.Version
 		}
-		s.cleanupSomeExpiredLocked(now)
+		s.cleanupSomeMetadataLocked(now, false)
 	}
-	return ok
+	if !ok {
+		return fmt.Errorf("cache rejected entry")
+	}
+	return nil
 }
 
 func (s *Store) Del(key string) {
@@ -221,13 +254,22 @@ func (s *Store) expireKeyLocked(key string, now time.Time) bool {
 	return true
 }
 
-func (s *Store) cleanupSomeExpiredLocked(now time.Time) {
+func (s *Store) cleanupSomeMetadataLocked(now time.Time, reclaimEvicted bool) {
 	scanned := 0
 	for key := range s.meta {
 		if scanned >= metadataCleanupScanLimit {
 			return
 		}
 		scanned++
-		s.expireKeyLocked(key, now)
+		if s.expireKeyLocked(key, now) {
+			continue
+		}
+		meta := s.meta[key]
+		if !reclaimEvicted || meta.tombstone {
+			continue
+		}
+		if _, ok := s.cache.Get(key); !ok {
+			delete(s.meta, key)
+		}
 	}
 }

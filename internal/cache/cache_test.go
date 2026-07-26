@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -76,8 +77,8 @@ func TestStoreTombstoneRejectsOlderWrite(t *testing.T) {
 	if ok := store.DeleteVersioned("k", v(20), time.Minute); !ok {
 		t.Fatalf("delete returned false")
 	}
-	if ok := store.SetVersioned("k", []byte("stale"), time.Minute, v(10)); !ok {
-		t.Fatalf("stale set returned false")
+	if ok := store.SetVersioned("k", []byte("stale"), time.Minute, v(10)); ok {
+		t.Fatalf("stale set was accepted")
 	}
 
 	if value, found := store.Get("k"); found {
@@ -89,6 +90,26 @@ func TestStoreTombstoneRejectsOlderWrite(t *testing.T) {
 	}
 	if !entry.Tombstone || entry.Version.Compare(v(20)) != 0 {
 		t.Fatalf("entry=%+v, want tombstone version 20", entry)
+	}
+}
+
+func TestApplyVersionedReportsStaleCurrentVersion(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.ApplyDeleteVersioned("k", v(20), time.Minute); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	err = store.ApplyVersioned("k", []byte("stale"), time.Minute, v(10))
+	if !errors.Is(err, ErrStaleVersion) {
+		t.Fatalf("apply error = %v, want ErrStaleVersion", err)
+	}
+	var stale *StaleVersionError
+	if !errors.As(err, &stale) || stale.Current.Compare(v(20)) != 0 {
+		t.Fatalf("stale error = %#v, want current version 20", err)
 	}
 }
 
@@ -193,8 +214,8 @@ func TestStoreTombstoneMetadataSurvivesPayloadEviction(t *testing.T) {
 	}
 	store.cache.Del("k")
 
-	if ok := store.SetVersioned("k", []byte("stale"), time.Minute, v(10)); !ok {
-		t.Fatalf("stale set returned false")
+	if ok := store.SetVersioned("k", []byte("stale"), time.Minute, v(10)); ok {
+		t.Fatalf("stale set was accepted")
 	}
 	entry, found := store.GetEntry("k")
 	if !found {
@@ -202,6 +223,29 @@ func TestStoreTombstoneMetadataSurvivesPayloadEviction(t *testing.T) {
 	}
 	if !entry.Tombstone || entry.Version.Compare(v(20)) != 0 {
 		t.Fatalf("entry=%+v, want tombstone version 20", entry)
+	}
+}
+
+func TestStoreReclaimsLiveMetadataAfterPayloadEviction(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if ok := store.SetVersioned("k", []byte("value"), time.Minute, v(20)); !ok {
+		t.Fatalf("set returned false")
+	}
+	store.cache.Del("k")
+
+	if entry, found := store.GetEntry("k"); found {
+		t.Fatalf("expected evicted value to miss, got %+v", entry)
+	}
+	store.mu.Lock()
+	_, retained := store.meta["k"]
+	store.mu.Unlock()
+	if retained {
+		t.Fatalf("live metadata remained after payload eviction")
 	}
 }
 
@@ -292,6 +336,28 @@ func TestStoreMetadataCapCleansExpiredEntriesBoundedly(t *testing.T) {
 
 	if ok := store.SetVersioned("new", []byte("value"), time.Minute, v(2)); !ok {
 		t.Fatalf("set with expired metadata at cap returned false")
+	}
+	value, found := store.Get("new")
+	if !found || string(value) != "value" {
+		t.Fatalf("value=%q found=%v, want value", value, found)
+	}
+}
+
+func TestStoreMetadataCapReclaimsEvictedLiveEntries(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	store.maxMetaEntries = 1
+	if ok := store.SetVersioned("evicted", []byte("value"), time.Minute, v(1)); !ok {
+		t.Fatalf("initial set returned false")
+	}
+	store.cache.Del("evicted")
+
+	if ok := store.SetVersioned("new", []byte("value"), time.Minute, v(2)); !ok {
+		t.Fatalf("set at metadata cap did not reclaim evicted live entry")
 	}
 	value, found := store.Get("new")
 	if !found || string(value) != "value" {
