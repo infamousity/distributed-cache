@@ -19,6 +19,7 @@ c, err := dcache.Start(dcache.Options{
   PeerNodes:            []string{"10.0.0.10:8946"},
   SharedKey:            "super-secret",
   ReplicationFactor:    3,
+  WriteConcern:         dcache.WriteConcernMajority,
 })
 if err != nil {
   panic(err)
@@ -117,7 +118,7 @@ node-to-node fetch, store, delete, ping, and repair operations.
 - configurable replication factor
 - namespace-aware `Get`, `Set`, and `Del`
 - TTL support per write
-- majority write concern for stronger invalidation paths
+- configurable `one`, `majority`, and `all` write concerns
 - tombstones to prevent stale delete resurrection
 - read repair and background anti-entropy
 - static peer lists or DNS peer refresh
@@ -126,6 +127,22 @@ node-to-node fetch, store, delete, ping, and repair operations.
 - optional Prometheus metrics
 - shared-key authentication for gossip and control-plane traffic
 - optional TLS and mTLS-ready configuration
+
+## Write Concern
+
+Configuration-driven startup defaults to `majority`. Configure `one`,
+`majority`, or `all` with `common.cache.write_concern` or
+`CACHE_WRITE_CONCERN`.
+
+For Go API compatibility, direct `Start(Options{})` calls continue to default to
+`one`. Programmatic callers that want the recommended general-purpose default
+must set `Options.WriteConcern: WriteConcernMajority`, as shown above.
+
+`WriteConcernAll` waits for every replica assigned to the key. If any assigned
+replica is unavailable or rejects the version, the operation returns an error
+matching `ErrWriteIndeterminate`; it does not silently degrade to majority or
+one. Deploy support for `all` to every node before enabling it during a rolling
+upgrade.
 
 ## Runtime Contract
 

@@ -73,6 +73,9 @@ Important defaults:
 The write-concern default applies to configuration-driven startup.
 `Start(Options{})` retains the historical `one` default for Go API compatibility;
 set `Options.WriteConcern` explicitly when constructing a cache programmatically.
+With `all`, every replica assigned to the key must acknowledge the version or the
+operation returns `ErrWriteIndeterminate`. It does not automatically degrade to
+majority or `one`; deploy support for `all` to every node before enabling it.
 
 Traffic requirements:
 
