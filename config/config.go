@@ -27,13 +27,10 @@ import (
 )
 
 var (
-	tyTime          = reflect.TypeOf((*time.Time)(nil)).Elem()
-	tyTimePtr       = reflect.TypeOf((*time.Time)(nil))
-	bindAddressOnce sync.Once
-	bindAddress     string
-	bindAddressErr  error
-	bindFilter      = []string{"10.0.0.0/8", "172.0.0.0/8", "192.0.0.0/8"}
-	ifcPriority     = []string{
+	tyTime      = reflect.TypeOf((*time.Time)(nil)).Elem()
+	tyTimePtr   = reflect.TypeOf((*time.Time)(nil))
+	bindFilter  = []string{"10.0.0.0/8", "172.0.0.0/8", "192.0.0.0/8"}
+	ifcPriority = []string{
 		`en.*`,
 		`eth.*`,
 		`wl.*`,
@@ -290,7 +287,7 @@ func Load(paths ...string) (*Config, error) {
 	if len(envFiles) > 0 {
 		if err := godotenv.Overload(envFiles...); err != nil {
 			l.With("error", err).Errorf("failed to load .env files: %s", strings.Join(envFiles, ", "))
-			panic(err)
+			return nil, fmt.Errorf("load env files %s: %w", strings.Join(envFiles, ", "), err)
 		}
 	}
 
@@ -310,7 +307,7 @@ func Load(paths ...string) (*Config, error) {
 	base.SetDefault("common.cache.repair.max_keys_per_cycle", 1000)
 	base.SetDefault("common.cache.churn.grace_period_ms", 30000)
 	base.SetDefault("common.cache.peers.refresh_interval_ms", 30000)
-	base.SetDefault("common.cache.write_concern", "one")
+	base.SetDefault("common.cache.write_concern", "majority")
 	base.SetDefault("common.cache.tombstone_ttl_ms", 300000)
 	base.SetDefault("common.cache.diagnostics.self_check_timeout_ms", 1000)
 	base.SetDefault("common.cache.diagnostics.peer_warn_interval_ms", 10000)
@@ -348,32 +345,36 @@ func Load(paths ...string) (*Config, error) {
 		defaultBindFilter = bindFilter
 		base.Set("common.cache.cluster.memberlist.bind_address_filter", defaultBindFilter)
 	}
-	var ifacePrefixPriority []*regexp.Regexp
 	defaultIfcPriority := base.GetStringSlice("common.cache.cluster.memberlist.bind_interface_priority")
-	if defaultIfcPriority == nil {
-		ifacePrefixPriority = make([]*regexp.Regexp, 0)
-		for _, ifc := range ifcPriority {
-			if !strings.HasPrefix(ifc, "^") {
-				ifc = fmt.Sprintf("^%s", ifc)
-			}
-			if !strings.HasSuffix(ifc, "$") {
-				ifc = fmt.Sprintf("%s$", ifc)
-			}
-
-			ifacePrefixPriority = append(ifacePrefixPriority, regexp.MustCompile(ifc, regexp.RE2))
-		}
+	if len(defaultIfcPriority) == 0 {
+		defaultIfcPriority = ifcPriority
 		base.Set("common.cache.cluster.memberlist.bind_interface_priority", ifcPriority)
+	}
+	ifacePrefixPriority := make([]*regexp.Regexp, 0, len(defaultIfcPriority))
+	for _, ifc := range defaultIfcPriority {
+		if !strings.HasPrefix(ifc, "^") {
+			ifc = fmt.Sprintf("^%s", ifc)
+		}
+		if !strings.HasSuffix(ifc, "$") {
+			ifc = fmt.Sprintf("%s$", ifc)
+		}
+		compiled, err := regexp.Compile(ifc, regexp.RE2)
+		if err != nil {
+			return nil, fmt.Errorf("invalid bind_interface_priority pattern %q: %w", ifc, err)
+		}
+		ifacePrefixPriority = append(ifacePrefixPriority, compiled)
 	}
 	normalizeMemberlistAdvertiseAlias(base)
 
 	// decode
 	cfg := new(Config)
+	rootTemplate := newRootTemplate(defaultBindAddress(defaultBindFilter, ifacePrefixPriority))
 	hooks := mapstructure.ComposeDecodeHookFunc(
-		RecursiveStructToMapHookFunc(newRootTemplate(defaultBindAddress(defaultBindFilter, ifacePrefixPriority))),
+		RecursiveStructToMapHookFunc(rootTemplate),
 		mapstructure.StringToTimeDurationHookFunc(),
 		mapstructure.StringToSliceHookFunc(","),
 		TextUnmarshallerHookFunc(),
-		TemplateUnmarshallerHookFunc(newRootTemplate(defaultBindAddress(defaultBindFilter, ifacePrefixPriority))),
+		TemplateUnmarshallerHookFunc(rootTemplate),
 	)
 
 	if err := base.Unmarshal(cfg, func(vc *mapstructure.DecoderConfig) {
@@ -710,20 +711,33 @@ func hasAnyPrefix(prefixes []*regexp.Regexp, ss ...string) bool {
 
 // defaultBindAddress returns the first non-loopback, non-docker-bridge IPv4 address.
 func defaultBindAddress(validCIDRs []string, ifacePrefixPriority []*regexp.Regexp) func() (string, error) {
+	var (
+		once    sync.Once
+		address string
+		err     error
+	)
 	return func() (string, error) {
-		bindAddressOnce.Do(func() {
+		once.Do(func() {
 			l := log.Default()
 			if len(validCIDRs) == 0 {
 				validCIDRs = bindFilter
 			}
 
-			ipnets := make([]*net.IPNet, 0)
+			ipnets := make([]*net.IPNet, 0, len(validCIDRs))
 			for _, validCIDR := range validCIDRs {
-				_, ipnet, _ := net.ParseCIDR(validCIDR)
+				_, ipnet, parseErr := net.ParseCIDR(validCIDR)
+				if parseErr != nil {
+					err = fmt.Errorf("invalid bind_address_filter CIDR %q: %w", validCIDR, parseErr)
+					return
+				}
 				ipnets = append(ipnets, ipnet)
 			}
 
-			ifaces, err := net.Interfaces()
+			ifaces, interfaceErr := net.Interfaces()
+			if interfaceErr != nil {
+				err = interfaceErr
+				return
+			}
 			slices.SortFunc(ifaces, func(a, b net.Interface) int {
 				if hasAnyPrefix(ifacePrefixPriority, a.Name, b.Name) {
 					return strings.Compare(a.Name, b.Name)
@@ -736,11 +750,11 @@ func defaultBindAddress(validCIDRs []string, ifacePrefixPriority []*regexp.Regex
 				}
 				return strings.Compare(a.Name, b.Name)
 			})
-			l.Tracef("Checking first interface %s ", ifaces[0].Name)
-			if err != nil {
-				bindAddress, bindAddressErr = "", err
+			if len(ifaces) == 0 {
+				err = errors.New("no network interfaces found")
 				return
 			}
+			l.Tracef("Checking first interface %s ", ifaces[0].Name)
 			for _, iface := range ifaces {
 				if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 					continue
@@ -760,16 +774,15 @@ func defaultBindAddress(validCIDRs []string, ifacePrefixPriority []*regexp.Regex
 						}
 						return ipNet.Contains(ip)
 					}) {
-						bindAddress, bindAddressErr = ip.String(), nil
+						address = ip.String()
 						return
 					}
 				}
 			}
-			bindAddress, bindAddressErr = "", errors.New("no suitable LAN IPv4 address found")
-			return
+			err = errors.New("no suitable LAN IPv4 address found")
 		})
 
-		return bindAddress, bindAddressErr
+		return address, err
 	}
 }
 

@@ -46,6 +46,9 @@ func TestLoadBindsCacheEnvOnlyDeploymentFields(t *testing.T) {
 	if cfg.Common.Cache.SharedKey != "env-shared-key" {
 		t.Fatalf("shared key = %q", cfg.Common.Cache.SharedKey)
 	}
+	if cfg.Common.Cache.WriteConcern != "majority" {
+		t.Fatalf("default write concern = %q, want majority", cfg.Common.Cache.WriteConcern)
+	}
 	memberlist := cfg.Common.Cache.Cluster.MemberList
 	if memberlist.NodeName != "env-node" ||
 		memberlist.BindAddr != "127.0.0.1" ||
@@ -86,6 +89,43 @@ func TestLoadBindsCacheEnvOnlyDeploymentFields(t *testing.T) {
 	}
 	if !cfg.Common.Cache.Diagnostics.AllowInsecure {
 		t.Fatalf("expected allow insecure from env")
+	}
+}
+
+func TestLoadReturnsMalformedDotEnvError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(".env", []byte("CACHE_SHARED_KEY='unterminated\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected malformed .env error")
+	}
+}
+
+func TestLoadRejectsInvalidBindSelectionConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
+	path := filepath.Join(t.TempDir(), "config.yml")
+	contents := []byte(`common:
+  cache:
+    cluster:
+      memberlist:
+        bind_address_filter: ["not-a-cidr"]
+        bind_interface_priority: ["("]
+        bind_address: "{{ ip }}"
+`)
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatalf("expected invalid bind interface pattern error")
+	}
+}
+
+func TestDefaultBindAddressRejectsInvalidCIDR(t *testing.T) {
+	if _, err := defaultBindAddress([]string{"not-a-cidr"}, nil)(); err == nil {
+		t.Fatalf("expected invalid bind address filter error")
 	}
 }
 
