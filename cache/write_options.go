@@ -5,6 +5,7 @@ type WriteConcern int
 const (
 	WriteConcernOne WriteConcern = iota
 	WriteConcernMajority
+	WriteConcernAll
 )
 
 type CallOptions struct {

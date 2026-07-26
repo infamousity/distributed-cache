@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/infamousity/distributed-cache/internal/controlpb"
 	"github.com/infamousity/distributed-cache/internal/version"
@@ -100,7 +102,7 @@ func (c *Client) StoreVersioned(ctx context.Context, key string, value []byte, t
 		WriteConcern: toProtoWriteConcern(wc),
 		Version:      toProtoVersion(ver),
 	})
-	return err
+	return decodeVersionConflict(err)
 }
 
 func (c *Client) Delete(ctx context.Context, key string, wc WriteConcern) error {
@@ -109,6 +111,25 @@ func (c *Client) Delete(ctx context.Context, key string, wc WriteConcern) error 
 
 func (c *Client) DeleteVersioned(ctx context.Context, key string, ver version.Version, wc WriteConcern) error {
 	_, err := c.client.Delete(ctx, &controlpb.DeleteRequest{Key: key, WriteConcern: toProtoWriteConcern(wc), Version: toProtoVersion(ver)})
+	return decodeVersionConflict(err)
+}
+
+func decodeVersionConflict(err error) error {
+	if err == nil {
+		return nil
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.Aborted {
+		return err
+	}
+	for _, detail := range st.Details() {
+		if current, ok := detail.(*controlpb.Version); ok {
+			version := fromProtoVersion(current)
+			if !version.IsZero() {
+				return &VersionConflictError{Current: version, err: err}
+			}
+		}
+	}
 	return err
 }
 

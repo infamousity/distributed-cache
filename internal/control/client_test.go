@@ -2,12 +2,59 @@ package control
 
 import (
 	"context"
+	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
 
+	storecache "github.com/infamousity/distributed-cache/internal/cache"
 	"github.com/infamousity/distributed-cache/internal/version"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+func TestDurationFromMillisecondsRejectsInvalidWireValues(t *testing.T) {
+	for _, milliseconds := range []int64{-1, math.MaxInt64} {
+		if _, err := durationFromMilliseconds(milliseconds); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("milliseconds %d error = %v, want InvalidArgument", milliseconds, err)
+		}
+	}
+
+	got, err := durationFromMilliseconds(1500)
+	if err != nil {
+		t.Fatalf("valid duration: %v", err)
+	}
+	if got != 1500*time.Millisecond {
+		t.Fatalf("duration = %s, want 1.5s", got)
+	}
+}
+
+func TestStaleVersionIsReturnedAsAborted(t *testing.T) {
+	current := version.Version{Physical: 20, NodeID: "replica"}
+	handler := &captureHandler{storeErr: &storecache.StaleVersionError{Current: current}}
+	server, err := NewServer(handler, ServerOptions{BindAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	server.Start()
+	defer server.Stop()
+
+	client, err := Dial(server.Addr(), ClientOptions{DialTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	err = client.StoreVersioned(context.Background(), "k", []byte("stale"), time.Second, version.Version{Physical: 10, NodeID: "owner"}, WriteConcernReplica)
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("store error = %v, want Aborted", err)
+	}
+	var conflict *VersionConflictError
+	if !errors.As(err, &conflict) || conflict.Current.Compare(current) != 0 {
+		t.Fatalf("store error = %#v, want current version %s", err, current)
+	}
+}
 
 func TestTTLMillisecondsRoundsPositiveTTLUp(t *testing.T) {
 	if got := ttlMilliseconds(0); got != 0 {
@@ -115,6 +162,8 @@ type captureHandler struct {
 	deleteVersion version.Version
 	fetchEntry    Entry
 	fetchFound    bool
+	storeErr      error
+	deleteErr     error
 }
 
 func (h *captureHandler) NodeName() string {
@@ -131,14 +180,14 @@ func (h *captureHandler) Store(_ context.Context, _ string, _ []byte, _ time.Dur
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.storeVersion = version
-	return nil
+	return h.storeErr
 }
 
 func (h *captureHandler) Delete(_ context.Context, _ string, version version.Version, _ WriteConcern) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.deleteVersion = version
-	return nil
+	return h.deleteErr
 }
 
 func (h *captureHandler) versions() (version.Version, version.Version) {

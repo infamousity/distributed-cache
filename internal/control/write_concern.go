@@ -8,6 +8,7 @@ const (
 	WriteConcernOne      WriteConcern = 0
 	WriteConcernMajority WriteConcern = 1
 	WriteConcernReplica  WriteConcern = 2
+	WriteConcernAll      WriteConcern = 3
 )
 
 func toProtoWriteConcern(wc WriteConcern) controlpb.WriteConcern {
@@ -16,6 +17,8 @@ func toProtoWriteConcern(wc WriteConcern) controlpb.WriteConcern {
 		return controlpb.WriteConcern_WRITE_CONCERN_MAJORITY
 	case WriteConcernReplica:
 		return controlpb.WriteConcern_WRITE_CONCERN_REPLICA
+	case WriteConcernAll:
+		return controlpb.WriteConcern_WRITE_CONCERN_ALL
 	default:
 		return controlpb.WriteConcern_WRITE_CONCERN_ONE
 	}
@@ -27,6 +30,8 @@ func fromProtoWriteConcern(wc controlpb.WriteConcern) WriteConcern {
 		return WriteConcernMajority
 	case controlpb.WriteConcern_WRITE_CONCERN_REPLICA:
 		return WriteConcernReplica
+	case controlpb.WriteConcern_WRITE_CONCERN_ALL:
+		return WriteConcernAll
 	default:
 		return WriteConcernOne
 	}

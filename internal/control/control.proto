@@ -8,6 +8,7 @@ enum WriteConcern {
   WRITE_CONCERN_ONE = 0;
   WRITE_CONCERN_MAJORITY = 1;
   WRITE_CONCERN_REPLICA = 2;
+  WRITE_CONCERN_ALL = 3;
 }
 
 service ControlPlane {

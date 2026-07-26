@@ -114,9 +114,16 @@ func TestValidateConfigRejectsNegativeOperationalOptions(t *testing.T) {
 	}{
 		{name: "control timeout", opts: Options{ControlTimeout: -time.Second}},
 		{name: "retry interval", opts: Options{ReplicationRetryInterval: -time.Second}},
+		{name: "retry max attempts", opts: Options{ReplicationRetryMaxAttempts: -1}},
 		{name: "retry queue size", opts: Options{ReplicationRetryQueueSize: -1}},
+		{name: "repair interval", opts: Options{RepairInterval: -time.Second}},
+		{name: "repair max keys", opts: Options{RepairMaxKeysPerCycle: -1}},
 		{name: "self check timeout", opts: Options{SelfCheckTimeout: -time.Second}},
 		{name: "peer warn interval", opts: Options{PeerWarnInterval: -time.Second}},
+		{name: "partition count", opts: Options{PartitionCount: -1}},
+		{name: "replication factor", opts: Options{ReplicationFactor: -1}},
+		{name: "cache size", opts: Options{CacheSizeBytes: -1}},
+		{name: "write concern", opts: Options{WriteConcern: WriteConcern(99)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,6 +131,32 @@ func TestValidateConfigRejectsNegativeOperationalOptions(t *testing.T) {
 				t.Fatalf("expected validation error")
 			}
 		})
+	}
+}
+
+func TestConfigFromOptionsPreservesPeerNetworkCIDRs(t *testing.T) {
+	cfg, err := configFromOptions(Options{
+		NodeName:         "node-1",
+		ControlBindAddr:  "127.0.0.1",
+		ControlBindPort:  9090,
+		GossipBindAddr:   "127.0.0.1",
+		GossipBindPort:   8946,
+		PeerNetworkCIDRs: []string{"10.60.0.0/24"},
+	})
+	if err != nil {
+		t.Fatalf("config from options: %v", err)
+	}
+	got := cfg.Common.Cache.Cluster.MemberList.PeerNetworkCIDRs
+	if len(got) != 1 || got[0] != "10.60.0.0/24" {
+		t.Fatalf("peer network CIDRs = %v", got)
+	}
+}
+
+func TestValidateConfigRejectsClientCertWithoutTLS(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Common.Cache.Cluster.Tls.RequireClientCert = true
+	if err := validateConfig(cfg, Options{}); err == nil {
+		t.Fatalf("expected require_client_cert without TLS to fail")
 	}
 }
 
@@ -515,6 +548,64 @@ func TestReadyRequiresMinimumVerifiedPeers(t *testing.T) {
 	if !status.Ready || status.VerifiedPeers != 1 {
 		t.Fatalf("unexpected status: %+v", status)
 	}
+}
+
+func TestReadyRechecksKnownPeerControlPlane(t *testing.T) {
+	gossip1 := getFreePort(t)
+	gossip2 := getFreePort(t)
+	control1 := getFreePort(t)
+	control2 := getFreePort(t)
+
+	c1, err := Start(Options{
+		NodeName:            "readiness-caller",
+		ControlBindAddr:     "127.0.0.1",
+		ControlBindPort:     control1,
+		GossipBindAddr:      "127.0.0.1",
+		GossipBindPort:      gossip1,
+		SharedKey:           "test-key",
+		ReplicationFactor:   2,
+		MinReadyPeers:       1,
+		PeerRefreshInterval: 25 * time.Millisecond,
+		ControlTimeout:      50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("start caller: %v", err)
+	}
+	defer c1.Close()
+
+	c2, err := Start(Options{
+		NodeName:            "readiness-peer",
+		ControlBindAddr:     "127.0.0.1",
+		ControlBindPort:     control2,
+		GossipBindAddr:      "127.0.0.1",
+		GossipBindPort:      gossip2,
+		PeerNodes:           []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
+		SharedKey:           "test-key",
+		ReplicationFactor:   2,
+		PeerRefreshInterval: 25 * time.Millisecond,
+		ControlTimeout:      50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("start peer: %v", err)
+	}
+	defer c2.Close()
+
+	waitForMembers(t, c1, 2, 2*time.Second)
+	readyCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c1.WaitReady(readyCtx); err != nil {
+		t.Fatalf("wait ready: %v", err)
+	}
+
+	c2.control.Stop()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if errors.Is(c1.Ready(context.Background()), ErrNotReady) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("readiness stayed true after peer control plane stopped: %+v", c1.Status())
 }
 
 func TestSetPeerStateReportsVerifiedTransitionOnce(t *testing.T) {
@@ -1314,6 +1405,135 @@ func TestMajoritySetFailureIsIndeterminateAndLocallyVisible(t *testing.T) {
 	got, found := c1.store.Get(key)
 	if !found || string(got) != string(value) {
 		t.Fatalf("owner local store = found %v value %q, want %q", found, got, value)
+	}
+}
+
+func TestMajorityWritesRebaseAfterStaleReplicaRejection(t *testing.T) {
+	gossip1 := getFreePort(t)
+	gossip2 := getFreePort(t)
+	control1 := getFreePort(t)
+	control2 := getFreePort(t)
+
+	c1, err := Start(Options{
+		NodeName:          "stale-ack-owner",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control1,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip1,
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		WriteConcern:      WriteConcernMajority,
+	})
+	if err != nil {
+		t.Fatalf("start owner: %v", err)
+	}
+	defer c1.Close()
+
+	c2, err := Start(Options{
+		NodeName:          "stale-ack-replica",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   control2,
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    gossip2,
+		PeerNodes:         []string{fmt.Sprintf("127.0.0.1:%d", gossip1)},
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+		WriteConcern:      WriteConcernMajority,
+	})
+	if err != nil {
+		t.Fatalf("start replica: %v", err)
+	}
+	defer c2.Close()
+
+	waitForMembers(t, c1, 2, 2*time.Second)
+	waitForMembers(t, c2, 2, 2*time.Second)
+	key := keyOwnedByOtherNode(t, c2)
+	future := version.Version{Physical: time.Now().Add(24 * time.Hour).UnixMilli(), NodeID: c2.NodeName()}
+	if err := c2.store.ApplyVersioned(key, []byte("replica-newer"), time.Minute, future); err != nil {
+		t.Fatalf("seed newer replica version: %v", err)
+	}
+
+	err = c1.Set(context.Background(), key, []byte("owner-write"), time.Minute)
+	if err != nil {
+		t.Fatalf("set after version conflict: %v", err)
+	}
+	entry, found := c2.store.GetEntry(key)
+	if !found || entry.Version.Compare(future) <= 0 || string(entry.Value) != "owner-write" {
+		t.Fatalf("replica entry = found %v %+v, want rebased owner write", found, entry)
+	}
+
+	newer := version.Version{Physical: future.Physical + int64((24*time.Hour)/time.Millisecond), NodeID: c2.NodeName()}
+	if err := c2.store.ApplyVersioned(key, []byte("replica-newer-again"), time.Minute, newer); err != nil {
+		t.Fatalf("seed newer replica version before delete: %v", err)
+	}
+	if err := c1.Del(context.Background(), key); err != nil {
+		t.Fatalf("delete after version conflict: %v", err)
+	}
+	entry, found = c2.store.GetEntry(key)
+	if !found || !entry.Tombstone || entry.Version.Compare(newer) <= 0 {
+		t.Fatalf("replica entry = found %v %+v, want rebased tombstone", found, entry)
+	}
+}
+
+func TestWriteConcernAllRequiresEveryRF3Replica(t *testing.T) {
+	gossip1, gossip2, gossip3 := getFreePort(t), getFreePort(t), getFreePort(t)
+	control1, control2, control3 := getFreePort(t), getFreePort(t), getFreePort(t)
+
+	newNode := func(name string, gossipPort, controlPort int, peers []string) *DistributedCache {
+		t.Helper()
+		c, err := Start(Options{
+			NodeName:          name,
+			ControlBindAddr:   "127.0.0.1",
+			ControlBindPort:   controlPort,
+			GossipBindAddr:    "127.0.0.1",
+			GossipBindPort:    gossipPort,
+			PeerNodes:         peers,
+			SharedKey:         "test-key",
+			ReplicationFactor: 3,
+			ControlTimeout:    100 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("start %s: %v", name, err)
+		}
+		return c
+	}
+
+	c1 := newNode("all-owner", gossip1, control1, nil)
+	defer c1.Close()
+	peer := []string{fmt.Sprintf("127.0.0.1:%d", gossip1)}
+	c2 := newNode("all-caller", gossip2, control2, peer)
+	defer c2.Close()
+	c3 := newNode("all-unavailable", gossip3, control3, peer)
+	defer c3.Close()
+
+	waitForMembers(t, c1, 3, 3*time.Second)
+	waitForMembers(t, c2, 3, 3*time.Second)
+	waitForMembers(t, c3, 3, 3*time.Second)
+
+	keyOwnedByC1 := func(prefix string) string {
+		t.Helper()
+		for i := 0; i < 10000; i++ {
+			key := fmt.Sprintf("%s-%d", prefix, i)
+			owner, ok := c2.cluster.GetNode().Get(key)
+			if ok && owner == c1.NodeName() {
+				return key
+			}
+		}
+		t.Fatalf("failed to find key owned by %s", c1.NodeName())
+		return ""
+	}
+
+	c3.control.Stop()
+	if err := c2.Set(context.Background(), keyOwnedByC1("majority"), []byte("v"), time.Minute, WithWriteConcern(WriteConcernMajority)); err != nil {
+		t.Fatalf("majority write with one unavailable replica: %v", err)
+	}
+	err := c2.Set(context.Background(), keyOwnedByC1("all"), []byte("v"), time.Minute, WithWriteConcern(WriteConcernAll))
+	if !errors.Is(err, ErrWriteIndeterminate) {
+		t.Fatalf("all write error = %v, want ErrWriteIndeterminate", err)
+	}
+	err = c2.Del(context.Background(), keyOwnedByC1("all-delete"), WithWriteConcern(WriteConcernAll))
+	if !errors.Is(err, ErrWriteIndeterminate) {
+		t.Fatalf("all delete error = %v, want ErrWriteIndeterminate", err)
 	}
 }
 

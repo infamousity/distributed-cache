@@ -3,14 +3,17 @@ package control
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 
 	"github.com/infamousity/distributed-cache/internal/controlpb"
 	"github.com/infamousity/distributed-cache/internal/log"
@@ -114,16 +117,49 @@ func (s *Server) Fetch(ctx context.Context, req *controlpb.FetchRequest) (*contr
 }
 
 func (s *Server) Store(ctx context.Context, req *controlpb.StoreRequest) (*controlpb.StoreResponse, error) {
-	ttl := time.Duration(req.GetTtlMs()) * time.Millisecond
-	if err := s.handler.Store(ctx, req.GetKey(), req.GetValue(), ttl, fromProtoVersion(req.GetVersion()), fromProtoWriteConcern(req.GetWriteConcern())); err != nil {
+	ttl, err := durationFromMilliseconds(req.GetTtlMs())
+	if err != nil {
 		return nil, err
+	}
+	if err := s.handler.Store(ctx, req.GetKey(), req.GetValue(), ttl, fromProtoVersion(req.GetVersion()), fromProtoWriteConcern(req.GetWriteConcern())); err != nil {
+		return nil, rpcError(err)
 	}
 	return &controlpb.StoreResponse{Ok: true}, nil
 }
 
+func durationFromMilliseconds(milliseconds int64) (time.Duration, error) {
+	const maxDurationMilliseconds = int64((1<<63 - 1) / int64(time.Millisecond))
+	if milliseconds < 0 || milliseconds > maxDurationMilliseconds {
+		return 0, status.Errorf(codes.InvalidArgument, "ttl_ms must be between 0 and %d", maxDurationMilliseconds)
+	}
+	return time.Duration(milliseconds) * time.Millisecond, nil
+}
+
 func (s *Server) Delete(ctx context.Context, req *controlpb.DeleteRequest) (*controlpb.DeleteResponse, error) {
 	if err := s.handler.Delete(ctx, req.GetKey(), fromProtoVersion(req.GetVersion()), fromProtoWriteConcern(req.GetWriteConcern())); err != nil {
-		return nil, err
+		return nil, rpcError(err)
 	}
 	return &controlpb.DeleteResponse{Ok: true}, nil
+}
+
+type versionConflict interface {
+	CurrentVersion() version.Version
+}
+
+func rpcError(err error) error {
+	var conflict versionConflict
+	if !errors.As(err, &conflict) {
+		return err
+	}
+	current := conflict.CurrentVersion()
+	st := status.New(codes.Aborted, fmt.Sprintf("stale cache version; current version is %s", current))
+	detail := toProtoVersion(current)
+	if detail == nil {
+		return st.Err()
+	}
+	withDetails, detailsErr := st.WithDetails(detail)
+	if detailsErr != nil {
+		return st.Err()
+	}
+	return withDetails.Err()
 }
