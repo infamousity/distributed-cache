@@ -43,6 +43,10 @@ func main() {
 	tombstoneTTL := time.Duration(getenvInt("CACHE_TOMBSTONE_TTL_MS", 300000)) * time.Millisecond
 	valueTTL := time.Duration(getenvInt("CACHE_VALUE_TTL_MS", 600000)) * time.Millisecond
 	minReadyPeers := getenvInt("CACHE_DIAGNOSTICS_MIN_READY_PEERS", 0)
+	writeConcern, err := parseWriteConcern(getenv("CACHE_WRITE_CONCERN", "majority"))
+	if err != nil {
+		log.Fatalf("configure write concern: %v", err)
+	}
 
 	dc, err := dcache.Start(dcache.Options{
 		NodeName:             nodeName,
@@ -63,6 +67,7 @@ func main() {
 		CacheSizeBytes:       64 << 20,
 		TombstoneTTL:         tombstoneTTL,
 		MinReadyPeers:        minReadyPeers,
+		WriteConcern:         writeConcern,
 	})
 	if err != nil {
 		log.Fatalf("start cache: %v", err)
@@ -100,6 +105,19 @@ func main() {
 			fmt.Printf("node=%s found=%v value=%s\n", nodeName, found, value)
 		}
 		time.Sleep(5 * time.Second)
+	}
+}
+
+func parseWriteConcern(value string) (dcache.WriteConcern, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "one":
+		return dcache.WriteConcernOne, nil
+	case "majority", "quorum":
+		return dcache.WriteConcernMajority, nil
+	case "all":
+		return dcache.WriteConcernAll, nil
+	default:
+		return 0, fmt.Errorf("CACHE_WRITE_CONCERN must be one, majority, or all")
 	}
 }
 

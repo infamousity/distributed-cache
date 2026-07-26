@@ -80,9 +80,18 @@ defer c.Close()
 ```go
 _ = c.Set(ctx, "k", []byte("v"), time.Second, dcache.WithWriteConcern(dcache.WriteConcernMajority))
 _ = c.Del(ctx, "k", dcache.WithWriteConcern(dcache.WriteConcernMajority))
+
+// Require every assigned replica to acknowledge the version.
+_ = c.Set(ctx, "critical", []byte("v"), time.Second, dcache.WithWriteConcern(dcache.WriteConcernAll))
 ```
 
-Default write concern is `ONE`.
+Configuration-driven startup defaults to `MAJORITY`. Configure `one`, `majority`,
+or `all` with `common.cache.write_concern` / `CACHE_WRITE_CONCERN`.
+
+For Go API compatibility, `Start(Options{})` continues to default to `ONE`.
+Programmatic callers that want the recommended general-purpose default must set
+`Options.WriteConcern: WriteConcernMajority`. The exported numeric values of
+`WriteConcernOne` and `WriteConcernMajority` remain `0` and `1` respectively.
 
 With `WriteConcernMajority`, owner-side quorum failure returns an error matching
 `ErrWriteIndeterminate`:
@@ -98,6 +107,11 @@ if errors.Is(err, dcache.ErrWriteIndeterminate) {
 This cache is availability-oriented: a majority write error does not mean the
 write definitely did not happen. Callers that use majority writes for invalidation
 or delete semantics must treat `ErrWriteIndeterminate` as a distinct outcome.
+
+`WriteConcernAll` waits for every replica assigned to the key. If any assigned
+replica is unavailable or rejects the version, it returns `ErrWriteIndeterminate`.
+This favors consistency over latency and write availability. Deploy support for
+the `all` wire value to every node before enabling it during a rolling upgrade.
 
 ### Namespace (Transparent Prefixing)
 

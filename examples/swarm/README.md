@@ -139,6 +139,7 @@ STEADY_SECONDS=15 ./chaos.sh
 DEBUG_LOG_LINES=200 ./chaos.sh
 CLEANUP=1 ./chaos.sh
 IMAGE=registry.example.com/distributed-cache-example-app:latest ./chaos.sh
+CACHE_WRITE_CONCERN=all ./chaos.sh
 PLACEMENT_CONSTRAINT='node.hostname == swarm-node-1' ./chaos.sh
 HARNESS_TRANSPORT=service ./chaos.sh
 GOSSIP_DEGRADATION_MODE=fail ./chaos.sh
@@ -155,8 +156,8 @@ defaults to `app`, so the Swarm service defaults to
 target a full precomputed Swarm service name.
 `PRINT_CONFIG=1` prints the resolved Docker context, stack file, stack name,
 stack service name, full Swarm service name, harness service name, harness
-transport, internal harness URL, and image without building or deploying
-anything.
+transport, internal harness URL, image, and write concern without building or
+deploying anything.
 `STEADY_SECONDS` controls the quiet period before the final steady-state gossip
 check.
 If `HARNESS_URL` is not set, the default `HARNESS_TRANSPORT=service` executes
@@ -208,6 +209,7 @@ CACHE_GOSSIP_BIND_ADDR: "0.0.0.0"
 CACHE_GOSSIP_BIND_PORT: 8946
 CACHE_PEER_DNS_PORT: 8946
 CACHE_SHARED_KEY: dev-shared-key
+CACHE_WRITE_CONCERN: majority
 CACHE_TOMBSTONE_TTL_MS: 300000
 CACHE_VALUE_TTL_MS: 600000
 CACHE_DIAGNOSTICS_MIN_READY_PEERS: 2

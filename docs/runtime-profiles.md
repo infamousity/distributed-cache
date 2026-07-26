@@ -58,7 +58,7 @@ Important defaults:
 
 - `size_bytes`: `1073741824` bytes
 - `replication_factor`: `3`
-- `write_concern`: `one`
+- `write_concern`: `majority` (supported values: `one`, `majority`, `all`)
 - `retry.interval_ms`: `500`
 - `retry.max_attempts`: `3`
 - `retry.queue_size`: `1024`
@@ -69,6 +69,10 @@ Important defaults:
 - `tombstone_ttl_ms`: `300000`
 - `diagnostics.self_check_timeout_ms`: `1000`
 - `diagnostics.peer_warn_interval_ms`: `10000`
+
+The write-concern default applies to configuration-driven startup.
+`Start(Options{})` retains the historical `one` default for Go API compatibility;
+set `Options.WriteConcern` explicitly when constructing a cache programmatically.
 
 Traffic requirements:
 

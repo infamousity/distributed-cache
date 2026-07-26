@@ -2,7 +2,7 @@ version: '3.9'
 
 services:
   app:
-    image: distributed-cache-example-app:latest
+    image: ${IMAGE:-distributed-cache-example-app:latest}
     networks:
       - cache_control
     deploy:
@@ -36,13 +36,14 @@ services:
       CACHE_SHARED_KEY: dev-shared-key
       CACHE_TOMBSTONE_TTL_MS: 300000
       CACHE_VALUE_TTL_MS: 600000
+      CACHE_WRITE_CONCERN: "${CACHE_WRITE_CONCERN:-majority}"
       CACHE_STARTUP_WAIT_MS: 5000
       # Three replicas means each node expects both other peers before it is
       # considered ready.
       CACHE_DIAGNOSTICS_MIN_READY_PEERS: 2
 
   harness:
-    image: distributed-cache-example-app:latest
+    image: ${IMAGE:-distributed-cache-example-app:latest}
     networks:
       - cache_control
     command: ["sh", "-c", "while true; do sleep 3600; done"]
