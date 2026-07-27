@@ -59,9 +59,6 @@ type DistributedCache struct {
 	diagnosticsWg           sync.WaitGroup
 	diagnosticsLastDegraded uint64
 
-	keyMu sync.RWMutex
-	keys  map[string]keyMeta
-
 	versionMu   sync.Mutex
 	lastVersion version.Version
 
@@ -213,9 +210,6 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 				d.metrics.MissTotal.Inc()
 			}
 		}
-		if !found {
-			d.removeKey(nsKey)
-		}
 		return entry.Value, found, nil
 	}
 
@@ -265,6 +259,8 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 	}
 	var best control.Entry
 	var bestFound bool
+	var bestExpiresAt time.Time
+	var bestExpiryKnown bool
 	self := d.cluster.GetNode().GetSelf()
 	if local, localFound := d.store.GetEntry(nsKey); localFound {
 		best = control.Entry{
@@ -273,6 +269,8 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 			Tombstone: local.Tombstone,
 		}
 		bestFound = true
+		bestExpiresAt = local.ExpiresAt
+		bestExpiryKnown = true
 	}
 	for _, member := range members {
 		if member == self || member == owner {
@@ -295,6 +293,8 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 		if rerr == nil && found && betterReplicaEntry(entry, best, bestFound) {
 			best = entry
 			bestFound = true
+			bestExpiresAt = time.Time{}
+			bestExpiryKnown = false
 		}
 	}
 	if bestFound {
@@ -316,11 +316,10 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 		}
 		if d.metrics != nil {
 			d.metrics.HitTotal.Inc()
-			d.metrics.ReadRepairTotal.Inc()
 		}
-		if meta, ok := d.keyMeta(nsKey); ok {
-			ttl := time.Until(meta.expiresAt)
-			if meta.expiresAt.IsZero() || ttl < 0 {
+		if bestExpiryKnown {
+			ttl := time.Until(bestExpiresAt)
+			if bestExpiresAt.IsZero() || ttl < 0 {
 				ttl = 0
 			}
 			if ownerAddr, ok := d.cluster.GetNode().GetForwardAddr(owner); ok {
@@ -330,10 +329,13 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 					key:       nsKey,
 					value:     best.Value,
 					ttl:       ttl,
-					expiresAt: meta.expiresAt,
+					expiresAt: bestExpiresAt,
 					version:   best.Version,
 					attempts:  1,
 				})
+				if d.metrics != nil {
+					d.metrics.ReadRepairTotal.Inc()
+				}
 			}
 		}
 		return best.Value, true, nil
@@ -536,7 +538,6 @@ func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error
 		repairStop:      make(chan struct{}),
 		repairNow:       make(chan struct{}, 1),
 		diagnosticsStop: make(chan struct{}),
-		keys:            make(map[string]keyMeta),
 		peerWarnLast:    make(map[string]time.Time),
 		peers:           make(map[string]PeerStatus),
 		verifying:       make(map[string]struct{}),
@@ -834,18 +835,12 @@ func (d *DistributedCache) storeLocalVersioned(key string, value []byte, ttl tim
 	if err := d.store.ApplyVersioned(key, value, ttl, version); err != nil {
 		return fmt.Errorf("store value: %w", err)
 	}
-	if entry, ok := d.store.GetEntry(key); ok && entry.Version.Compare(version) == 0 && !entry.Tombstone {
-		d.addKey(key, ttl, version, false)
-	}
 	return nil
 }
 
 func (d *DistributedCache) deleteLocalVersioned(key string, version version.Version) error {
 	if err := d.store.ApplyDeleteVersioned(key, version, d.opts.TombstoneTTL); err != nil {
 		return fmt.Errorf("store tombstone: %w", err)
-	}
-	if entry, ok := d.store.GetEntry(key); ok && entry.Version.Compare(version) == 0 && entry.Tombstone {
-		d.addKey(key, d.opts.TombstoneTTL, version, true)
 	}
 	return nil
 }
@@ -1639,51 +1634,6 @@ func classifyPeerError(err error) peerErrKind {
 	return peerErrOther
 }
 
-type keyMeta struct {
-	expiresAt time.Time
-	version   version.Version
-	tombstone bool
-}
-
-func (d *DistributedCache) addKey(key string, ttl time.Duration, version version.Version, tombstone bool) {
-	var exp time.Time
-	if ttl > 0 {
-		exp = time.Now().Add(ttl)
-	}
-	d.keyMu.Lock()
-	d.keys[key] = keyMeta{expiresAt: exp, version: version, tombstone: tombstone}
-	d.keyMu.Unlock()
-}
-
-func (d *DistributedCache) removeKey(key string) {
-	d.keyMu.Lock()
-	delete(d.keys, key)
-	d.keyMu.Unlock()
-}
-
-func (d *DistributedCache) snapshotKeys(max int) []string {
-	d.keyMu.RLock()
-	defer d.keyMu.RUnlock()
-	if max <= 0 || max > len(d.keys) {
-		max = len(d.keys)
-	}
-	out := make([]string, 0, max)
-	for k := range d.keys {
-		out = append(out, k)
-		if len(out) >= max {
-			break
-		}
-	}
-	return out
-}
-
-func (d *DistributedCache) keyMeta(key string) (keyMeta, bool) {
-	d.keyMu.RLock()
-	defer d.keyMu.RUnlock()
-	m, ok := d.keys[key]
-	return m, ok
-}
-
 type retryKind int
 
 const (
@@ -2055,25 +2005,23 @@ func (d *DistributedCache) peerDNSNames() []string {
 }
 
 func (d *DistributedCache) runRepairCycle() {
-	keys := d.snapshotKeys(d.opts.RepairMaxKeysPerCycle)
+	keys := d.store.SnapshotKeys(d.opts.RepairMaxKeysPerCycle)
 	if len(keys) == 0 {
 		return
 	}
 	self := d.cluster.GetNode().GetSelf()
 	now := time.Now()
 	for _, key := range keys {
-		meta, ok := d.keyMeta(key)
-		if ok && !meta.expiresAt.IsZero() && now.After(meta.expiresAt) {
+		entry, found := d.store.GetEntry(key)
+		if !found {
+			continue
+		}
+		expiresAt := entry.ExpiresAt
+		if !expiresAt.IsZero() && now.After(expiresAt) {
 			d.store.Del(key)
-			d.removeKey(key)
 			if d.metrics != nil {
 				d.metrics.AntiEntropyTotal.Inc()
 			}
-			continue
-		}
-		entry, found := d.store.GetEntry(key)
-		if !found {
-			d.removeKey(key)
 			continue
 		}
 		d.observeVersion(entry.Version)
@@ -2100,7 +2048,6 @@ func (d *DistributedCache) runRepairCycle() {
 				continue
 			}
 			d.store.Del(key)
-			d.removeKey(key)
 			d.clearOwnershipLost(key)
 			if d.metrics != nil {
 				d.metrics.AntiEntropyTotal.Inc()
@@ -2111,12 +2058,11 @@ func (d *DistributedCache) runRepairCycle() {
 		d.clearOwnershipLost(key)
 
 		ttl := time.Duration(0)
-		if !meta.expiresAt.IsZero() {
-			if meta.expiresAt.After(now) {
-				ttl = time.Until(meta.expiresAt)
+		if !expiresAt.IsZero() {
+			if expiresAt.After(now) {
+				ttl = time.Until(expiresAt)
 			} else {
 				d.store.Del(key)
-				d.removeKey(key)
 				if d.metrics != nil {
 					d.metrics.AntiEntropyTotal.Inc()
 				}
@@ -2139,7 +2085,7 @@ func (d *DistributedCache) runRepairCycle() {
 					key:       key,
 					value:     entry.Value,
 					ttl:       ttl,
-					expiresAt: meta.expiresAt,
+					expiresAt: expiresAt,
 					version:   entry.Version,
 					attempts:  1,
 				})
@@ -2155,7 +2101,7 @@ func (d *DistributedCache) runRepairCycle() {
 					key:       key,
 					value:     entry.Value,
 					ttl:       ttl,
-					expiresAt: meta.expiresAt,
+					expiresAt: expiresAt,
 					version:   entry.Version,
 					attempts:  1,
 				})

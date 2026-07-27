@@ -33,6 +33,7 @@ type Entry struct {
 	Value     []byte
 	Version   version.Version
 	Tombstone bool
+	ExpiresAt time.Time
 }
 
 type entryMeta struct {
@@ -110,7 +111,7 @@ func (s *Store) GetEntry(key string) (Entry, bool) {
 	}
 	meta, metaOK := s.meta[key]
 	if metaOK && meta.tombstone {
-		return Entry{Version: meta.version, Tombstone: true}, true
+		return Entry{Version: meta.version, Tombstone: true, ExpiresAt: meta.expiresAt}, true
 	}
 	entry, ok := s.cache.Get(key)
 	if !ok {
@@ -122,6 +123,7 @@ func (s *Store) GetEntry(key string) (Entry, bool) {
 	if metaOK {
 		entry.Version = meta.version
 		entry.Tombstone = meta.tombstone
+		entry.ExpiresAt = meta.expiresAt
 	}
 	entry.Value = cloneBytes(entry.Value)
 	return entry, true
@@ -163,6 +165,7 @@ func (s *Store) put(key string, entry Entry, ttl time.Duration) error {
 		tombstone: entry.Tombstone,
 		expiresAt: expiresAtForTTL(now, ttl),
 	}
+	entry.ExpiresAt = nextMeta.expiresAt
 	if current, ok := s.meta[key]; ok && metaIsOlder(nextMeta, current) {
 		return &StaleVersionError{Current: current.version}
 	}
@@ -216,6 +219,22 @@ func entryCost(key string, entry Entry) int64 {
 		valueCost = 1
 	}
 	return int64(len(key)) + int64(valueCost)
+}
+
+func (s *Store) SnapshotKeys(max int) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if max <= 0 || max > len(s.meta) {
+		max = len(s.meta)
+	}
+	keys := make([]string, 0, max)
+	for key := range s.meta {
+		keys = append(keys, key)
+		if len(keys) >= max {
+			break
+		}
+	}
+	return keys
 }
 
 func (s *Store) Del(key string) {

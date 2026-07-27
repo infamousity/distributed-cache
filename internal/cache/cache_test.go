@@ -67,6 +67,38 @@ func TestAdmissionCountersScaleWithCacheCapacity(t *testing.T) {
 	}
 }
 
+func TestSnapshotKeysUsesStoreMetadataIndex(t *testing.T) {
+	store, err := NewStore(1 << 20)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.ApplyVersioned("value", []byte("v"), time.Minute, v(1)); err != nil {
+		t.Fatalf("store value: %v", err)
+	}
+	if err := store.ApplyDeleteVersioned("tombstone", v(2), time.Minute); err != nil {
+		t.Fatalf("store tombstone: %v", err)
+	}
+	value, ok := store.GetEntry("value")
+	if !ok || value.ExpiresAt.IsZero() {
+		t.Fatalf("value expiry = %v, found = %t; want a tracked expiry", value.ExpiresAt, ok)
+	}
+	tombstone, ok := store.GetEntry("tombstone")
+	if !ok || tombstone.ExpiresAt.IsZero() {
+		t.Fatalf("tombstone expiry = %v, found = %t; want a tracked expiry", tombstone.ExpiresAt, ok)
+	}
+
+	keys := store.SnapshotKeys(1)
+	if len(keys) != 1 {
+		t.Fatalf("snapshot size = %d, want 1", len(keys))
+	}
+	all := store.SnapshotKeys(0)
+	if len(all) != 2 {
+		t.Fatalf("full snapshot size = %d, want 2", len(all))
+	}
+}
+
 func TestEntryCostIncludesKeyBytes(t *testing.T) {
 	entry := Entry{Value: []byte("value")}
 	if got, want := entryCost("key", entry), int64(len("key")+len("value")); got != want {
