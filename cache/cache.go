@@ -213,9 +213,12 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 		return entry.Value, found, nil
 	}
 
-	addr, ok := d.cluster.GetNode().GetForwardAddr(owner)
-	if !ok {
-		return nil, false, fmt.Errorf("owner address not found")
+	addr, err := d.validatedReadAddr(ctx, owner)
+	if err != nil {
+		if d.metrics != nil {
+			d.metrics.ForwardErrorTotal.Inc()
+		}
+		return nil, false, err
 	}
 	if d.metrics != nil {
 		d.metrics.ForwardTotal.Inc()
@@ -276,8 +279,8 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 		if member == self || member == owner {
 			continue
 		}
-		replicaAddr, ok := d.cluster.GetNode().GetForwardAddr(member)
-		if !ok {
+		replicaAddr, rerr := d.validatedReadAddr(ctx, member)
+		if rerr != nil {
 			continue
 		}
 		replicaClient, rerr := d.clientFor(replicaAddr)
@@ -1246,6 +1249,9 @@ func (d *DistributedCache) PeerJoined(name, controlAddr string) {
 func (d *DistributedCache) PeerLeft(name string, controlAddr string) {
 	d.setPeerState(name, controlAddr, PeerStateLeft, "")
 	d.evictClient(controlAddr)
+	d.peerWarnMu.Lock()
+	delete(d.peerWarnLast, controlAddr)
+	d.peerWarnMu.Unlock()
 }
 
 func (d *DistributedCache) PeerUpdated(name, oldControlAddr, controlAddr string) {
@@ -1346,7 +1352,7 @@ func (d *DistributedCache) setPeerState(name, addr string, state PeerState, last
 	now := time.Now()
 	d.peerMu.Lock()
 	existing, ok := d.peers[name]
-	if ok && existing.State == PeerStateLeft && (state == PeerStateUnreachable || state == PeerStateIdentityMismatch) {
+	if ok && existing.State == PeerStateLeft && state != PeerStateJoined {
 		d.peerMu.Unlock()
 		return false
 	}
@@ -1366,6 +1372,12 @@ func (d *DistributedCache) validatedOwnerAddr(ctx context.Context, owner string)
 	addr, ok := d.cluster.GetNode().GetForwardAddr(owner)
 	if !ok || addr == "" {
 		return "", fmt.Errorf("%w: owner %s address not found", ErrNotReady, owner)
+	}
+	if state, known := d.peerStateForAddr(owner, addr); known {
+		switch state {
+		case PeerStateLeft, PeerStateIdentityMismatch:
+			return "", fmt.Errorf("%w: owner %s is %s", ErrNotReady, owner, state)
+		}
 	}
 	client, err := d.clientFor(addr)
 	if err != nil {
@@ -1387,7 +1399,36 @@ func (d *DistributedCache) validatedOwnerAddr(ctx context.Context, owner string)
 		return "", fmt.Errorf("%w: owner %s identity mismatch: ping returned %s", ErrNotReady, owner, got)
 	}
 	d.setPeerState(owner, addr, PeerStateVerified, "")
+	if state, verified := d.peerStateForAddr(owner, addr); !verified || state != PeerStateVerified {
+		return "", fmt.Errorf("%w: owner %s left during identity verification", ErrNotReady, owner)
+	}
 	return addr, nil
+}
+
+func (d *DistributedCache) validatedReadAddr(ctx context.Context, owner string) (string, error) {
+	addr, ok := d.cluster.GetNode().GetForwardAddr(owner)
+	if !ok || addr == "" {
+		return "", fmt.Errorf("%w: owner %s address not found", ErrNotReady, owner)
+	}
+	if state, known := d.peerStateForAddr(owner, addr); known {
+		switch state {
+		case PeerStateVerified:
+			return addr, nil
+		case PeerStateLeft, PeerStateIdentityMismatch:
+			return "", fmt.Errorf("%w: owner %s is %s", ErrNotReady, owner, state)
+		}
+	}
+	return d.validatedOwnerAddr(ctx, owner)
+}
+
+func (d *DistributedCache) peerStateForAddr(name, addr string) (PeerState, bool) {
+	d.peerMu.RLock()
+	peer, ok := d.peers[name]
+	d.peerMu.RUnlock()
+	if !ok || peer.ControlAddr != addr {
+		return "", false
+	}
+	return peer.State, true
 }
 
 func (d *DistributedCache) updatePeerMetrics() {

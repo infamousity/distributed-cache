@@ -636,6 +636,28 @@ func TestSetPeerStateReportsVerifiedTransitionOnce(t *testing.T) {
 	if c.setPeerState("peer-1", "127.0.0.1:1", PeerStateVerified, "") {
 		t.Fatalf("repeated verified state should not report transition")
 	}
+	c.peerWarnMu.Lock()
+	c.peerWarnLast["127.0.0.1:1"] = time.Now()
+	c.peerWarnMu.Unlock()
+	c.PeerLeft("peer-1", "127.0.0.1:1")
+	c.peerWarnMu.Lock()
+	_, warningRetained := c.peerWarnLast["127.0.0.1:1"]
+	c.peerWarnMu.Unlock()
+	if warningRetained {
+		t.Fatalf("peer warning throttle retained after leave")
+	}
+	if c.setPeerState("peer-1", "127.0.0.1:1", PeerStateVerified, "") {
+		t.Fatalf("late verification after leave should not report transition")
+	}
+	if got := c.Status().Peers[0].State; got != PeerStateLeft {
+		t.Fatalf("late verification changed peer state to %q, want %q", got, PeerStateLeft)
+	}
+	if c.setPeerState("peer-1", "127.0.0.1:1", PeerStateJoined, "") {
+		t.Fatalf("rejoin state should not report verified transition")
+	}
+	if !c.setPeerState("peer-1", "127.0.0.1:1", PeerStateVerified, "") {
+		t.Fatalf("verification after rejoin should report transition")
+	}
 }
 
 func TestScheduleRepairUsesRepairIntervalAsDebounce(t *testing.T) {
@@ -1009,6 +1031,33 @@ func TestForwardedSetReturnsNotReadyForUnverifiedOwner(t *testing.T) {
 	err = c.Set(context.Background(), key, []byte("value"), time.Minute)
 	if !errors.Is(err, ErrNotReady) {
 		t.Fatalf("Set error = %v, want ErrNotReady", err)
+	}
+}
+
+func TestForwardedGetRejectsOwnerIdentityMismatch(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "get-forwarder",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 2,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	c.cluster.GetNode().Add("claimed-owner", c.control.Addr())
+	key := keyOwnedByNode(t, c, "claimed-owner")
+
+	_, _, err = c.Get(context.Background(), key)
+	if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("Get error = %v, want ErrNotReady", err)
+	}
+	if _, ok := c.cluster.GetNode().GetForwardAddr("claimed-owner"); ok {
+		t.Fatalf("identity-mismatched owner remained in routing ring")
 	}
 }
 
