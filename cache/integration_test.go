@@ -33,13 +33,29 @@ func testVersion(physical int64, nodeID string) version.Version {
 	return version.Version{Physical: physical, NodeID: nodeID}
 }
 
+var testPorts sync.Map
+
 func getFreePort(t *testing.T) int {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	t.Helper()
+	for range 100 {
+		tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen TCP: %v", err)
+		}
+		port := tcpListener.Addr().(*net.TCPAddr).Port
+		udpListener, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			_ = tcpListener.Close()
+			continue
+		}
+		_ = udpListener.Close()
+		_ = tcpListener.Close()
+		if _, loaded := testPorts.LoadOrStore(port, struct{}{}); !loaded {
+			return port
+		}
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	t.Fatal("failed to allocate a unique TCP/UDP test port")
+	return 0
 }
 
 func waitForValue(t *testing.T, c *DistributedCache, key string, want []byte, timeout time.Duration) {
