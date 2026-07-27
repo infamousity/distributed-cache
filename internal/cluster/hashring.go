@@ -4,9 +4,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/dgraph-io/ristretto/v2/z"
-
 	"github.com/buraksezer/consistent"
+	"github.com/twmb/murmur3"
 
 	"github.com/infamousity/distributed-cache/config"
 )
@@ -37,11 +36,13 @@ func (m ringMember) String() string {
 	return m.Name
 }
 
-// hasher implements consistent.Hasher via xxhash
+// hasher implements consistent.Hasher using the stable hash shared by every
+// cluster member. Changing this function remaps keys and requires a coordinated
+// migration.
 type hasher struct{}
 
 func (h hasher) Sum64(data []byte) uint64 {
-	keyHash, _ := z.KeyToHash(string(data))
+	keyHash, _ := murmur3.StringSum128(string(data))
 	return keyHash
 }
 
