@@ -19,7 +19,6 @@ import (
 	"github.com/Masterminds/sprig/v3"
 	regexp "github.com/dlclark/regexp2"
 	"github.com/go-viper/mapstructure/v2"
-	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 	"mvdan.cc/sh/v3/shell"
 
@@ -29,7 +28,7 @@ import (
 var (
 	tyTime      = reflect.TypeOf((*time.Time)(nil)).Elem()
 	tyTimePtr   = reflect.TypeOf((*time.Time)(nil))
-	bindFilter  = []string{"10.0.0.0/8", "172.0.0.0/8", "192.0.0.0/8"}
+	bindFilter  = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
 	ifcPriority = []string{
 		`en.*`,
 		`eth.*`,
@@ -55,7 +54,7 @@ type Config struct {
 				MemberList struct {
 					NodeName          string   `mapstructure:"node_name"`
 					BindAddr          string   `mapstructure:"bind_address"`            // listener address, e.g. "0.0.0.0"
-					BindAddrFilter    []string `mapstructure:"bind_address_filter"`     // defaults to ["10.0.0.0/8", "172.0.0.0/8", "192.0.0.0/8"]
+					BindAddrFilter    []string `mapstructure:"bind_address_filter"`     // defaults to RFC1918 IPv4 networks
 					BindIfcPriority   []string `mapstructure:"bind_interface_priority"` // defaults to ["^en.*$", "^eth.*$", "^wl.*$"]
 					BindPort          int      `mapstructure:"bind_port"`               // gossip port, e.g. 8946
 					AdvertiseAddr     string   `mapstructure:"advertise_addr"`          // peer-reachable gossip IP or IP:port; falls back to BindAddr when omitted
@@ -266,31 +265,6 @@ func internalBinds(v *viper.Viper) error {
 // Load reads, merges, and decodes one or more config files in order.
 // It falls back to $CACHE_CONFIG env (comma‐delimited) if no paths are passed.
 func Load(paths ...string) (*Config, error) {
-	l := log.Default()
-	envFiles := make([]string, 0)
-	rawEnvFiles := []string{
-		ShouldExpand("./.env"),
-		ShouldExpand("./.env.local"),
-	}
-
-	for _, re := range rawEnvFiles {
-		if absRe, aerr := filepath.Abs(re); aerr != nil {
-			continue
-		} else {
-			if fi, err := os.Stat(absRe); err == nil {
-				if fi.Mode().IsRegular() && fi.Size() > 0 && !fi.IsDir() && !slices.Contains(envFiles, fi.Name()) {
-					envFiles = append(envFiles, absRe)
-				}
-			}
-		}
-	}
-	if len(envFiles) > 0 {
-		if err := godotenv.Overload(envFiles...); err != nil {
-			l.With("error", err).Errorf("failed to load .env files: %s", strings.Join(envFiles, ", "))
-			return nil, fmt.Errorf("load env files %s: %w", strings.Join(envFiles, ", "), err)
-		}
-	}
-
 	base := viper.New()
 	base.SetEnvPrefix("CACHE")
 	base.AutomaticEnv()
@@ -324,9 +298,16 @@ func Load(paths ...string) (*Config, error) {
 	}
 
 	for _, path := range paths {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			l.Warnf("warning: config file not found (%s), skipping", path)
-			continue
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return nil, fmt.Errorf("config file path is empty")
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("stat config %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("config path %s is not a regular file", path)
 		}
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 		tmp := viper.New()

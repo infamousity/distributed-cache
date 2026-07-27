@@ -9,7 +9,6 @@ require (
 	github.com/dlclark/regexp2 v1.11.5
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/hashicorp/memberlist v0.5.3
-	github.com/joho/godotenv v1.5.1
 	github.com/prometheus/client_golang v1.11.1
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.20.1

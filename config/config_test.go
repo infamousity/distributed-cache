@@ -6,9 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestDefaultBindFilterContainsOnlyRFC1918Networks(t *testing.T) {
+	want := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	if !slices.Equal(bindFilter, want) {
+		t.Fatalf("default bind filter = %v, want %v", bindFilter, want)
+	}
+}
 
 func TestLoadBindsCacheEnvOnlyDeploymentFields(t *testing.T) {
 	t.Setenv("CACHE_CONFIG", "")
@@ -92,14 +100,39 @@ func TestLoadBindsCacheEnvOnlyDeploymentFields(t *testing.T) {
 	}
 }
 
-func TestLoadReturnsMalformedDotEnvError(t *testing.T) {
+func TestLoadDoesNotReadOrMutateDotEnvFiles(t *testing.T) {
 	t.Chdir(t.TempDir())
-	if err := os.WriteFile(".env", []byte("CACHE_SHARED_KEY='unterminated\n"), 0o600); err != nil {
+	t.Setenv("CACHE_CONFIG", "")
+	t.Setenv("CACHE_SHARED_KEY", "process-key")
+	if err := os.WriteFile(".env", []byte("CACHE_SHARED_KEY=file-key\n"), 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
 
-	if _, err := Load(); err == nil {
-		t.Fatalf("expected malformed .env error")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Common.Cache.SharedKey != "process-key" {
+		t.Fatalf("shared key = %q, want process environment value", cfg.Common.Cache.SharedKey)
+	}
+	if got := os.Getenv("CACHE_SHARED_KEY"); got != "process-key" {
+		t.Fatalf("process environment mutated to %q", got)
+	}
+}
+
+func TestLoadRejectsMissingExplicitConfig(t *testing.T) {
+	t.Setenv("CACHE_CONFIG", "")
+	path := filepath.Join(t.TempDir(), "missing.yml")
+	if _, err := Load(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("load error = %v, want os.ErrNotExist", err)
+	}
+}
+
+func TestLoadRejectsMissingCacheConfigPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.yml")
+	t.Setenv("CACHE_CONFIG", path)
+	if _, err := Load(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("load error = %v, want os.ErrNotExist", err)
 	}
 }
 
