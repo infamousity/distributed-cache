@@ -178,6 +178,9 @@ DOCKER_CONTEXT=default ./chaos.sh
 
 Key points:
 
+- maintained runtime images pin their Alpine base and run as the unprivileged
+  numeric user `65532:65532`; mounted configuration and TLS files must be
+  readable by that user
 - use `tasks.<service>` for peer discovery, or `peer_dns_names` when peers span
   multiple connected stacks or services
 - bind gossip and control-plane listeners inside an internal overlay

@@ -59,6 +59,10 @@ From the repository root:
 docker --context default build -t distributed-cache-example-app:latest -f examples/swarm/app/Dockerfile .
 ```
 
+The image pins its Alpine runtime base and runs as the unprivileged numeric user
+`65532:65532`. Any mounted configuration, certificate, or key files must be
+readable by that user.
+
 For multi-node Swarm:
 
 ```bash

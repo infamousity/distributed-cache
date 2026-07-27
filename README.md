@@ -228,6 +228,7 @@ docker --context default stack deploy -c examples/swarm/docker-stack.yml example
 ```
 
 Notes:
+- The maintained runtime images use a pinned Alpine base and run as the unprivileged numeric user `65532:65532`. Mounted configuration, certificate, and key files must be readable by that user.
 - `cache_control` is an internal, encrypted overlay network to isolate control-plane traffic.
 - In application stacks, each app replica embeds the cache and uses `tasks.<service>` for gossip peer discovery.
 - The library cache API is in-process; any HTTP/JSON/GraphQL/etc. route that uses the cache is owned by the host service.
