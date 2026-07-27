@@ -132,7 +132,7 @@ func (x *wrappedLog) TraceContext(ctx context.Context, msg string, args ...any) 
 }
 
 func (x *wrappedLog) Errorf(msg string, args ...any) {
-	x.Logger.Error(msg, args...)
+	x.Logger.Error(fmt.Sprintf(msg, args...))
 }
 
 type loggerOptions struct {
