@@ -44,7 +44,6 @@ type DistributedCache struct {
 	retryDelayCh      chan scheduledRetryTask
 	retryStop         chan struct{}
 	retryWg           sync.WaitGroup
-	replicationWg     sync.WaitGroup
 	retryDelayedDepth atomic.Int64
 
 	peerStop chan struct{}
@@ -78,12 +77,7 @@ type DistributedCache struct {
 	churnMu       sync.Mutex
 	ownershipLost map[string]time.Time
 
-	closeOnce sync.Once
-	closeErr  error
-	closed    atomic.Bool
-
-	operationMu sync.Mutex
-	operationWg sync.WaitGroup
+	lifecycle cacheLifecycle
 }
 
 var lookupIPAddr = net.DefaultResolver.LookupIPAddr
@@ -187,7 +181,7 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 	if !d.beginOperation() {
 		return nil, false, ErrClosed
 	}
-	defer d.operationWg.Done()
+	defer d.lifecycle.finishOperation()
 	call := d.resolveOptions(opts)
 	nsKey := d.namespacedKey(key, call)
 
@@ -352,7 +346,7 @@ func (d *DistributedCache) Set(ctx context.Context, key string, value []byte, tt
 	if !d.beginOperation() {
 		return ErrClosed
 	}
-	defer d.operationWg.Done()
+	defer d.lifecycle.finishOperation()
 	if ttl < 0 {
 		return ErrInvalidTTL
 	}
@@ -420,7 +414,7 @@ func (d *DistributedCache) Del(ctx context.Context, key string, opts ...DelOptio
 	if !d.beginOperation() {
 		return ErrClosed
 	}
-	defer d.operationWg.Done()
+	defer d.lifecycle.finishOperation()
 	call := d.resolveOptions(opts)
 	nsKey := d.namespacedKey(key, call)
 	wc := d.writeConcern(call)
@@ -482,42 +476,34 @@ func (d *DistributedCache) Del(ctx context.Context, key string, opts ...DelOptio
 }
 
 func (d *DistributedCache) Close() error {
-	d.closeOnce.Do(func() {
-		d.operationMu.Lock()
-		d.closed.Store(true)
-		d.operationMu.Unlock()
+	d.lifecycle.closeOnce.Do(func() {
+		d.lifecycle.closeAdmission()
 		d.stopRepairWorker()
 		d.stopPeerWorker()
 		d.stopDiagnosticsWorker()
 		d.waitForPeerVerifications()
-		d.operationWg.Wait()
-		d.replicationWg.Wait()
+		d.lifecycle.waitForOperations()
+		d.lifecycle.waitForReplication()
 		d.stopRetryWorker()
 		if d.control != nil {
 			d.control.Stop()
 		}
 		if d.cluster != nil {
-			if err := d.cluster.Shutdown(); err != nil && d.closeErr == nil {
-				d.closeErr = err
-			}
+			d.lifecycle.recordCloseError(d.cluster.Shutdown())
 		}
 		if d.metrics != nil {
-			if err := d.metrics.Stop(); err != nil && d.closeErr == nil {
-				d.closeErr = err
-			}
+			d.lifecycle.recordCloseError(d.metrics.Stop())
 		}
 		d.clientMu.Lock()
 		for _, c := range d.clients {
-			if err := c.Close(); err != nil && d.closeErr == nil {
-				d.closeErr = err
-			}
+			d.lifecycle.recordCloseError(c.Close())
 		}
 		d.clientMu.Unlock()
 		if d.store != nil {
 			d.store.Close()
 		}
 	})
-	return d.closeErr
+	return d.lifecycle.closeErr
 }
 
 func startFromConfig(cfg *config.Config, opts Options) (*DistributedCache, error) {
@@ -708,27 +694,18 @@ func (d *DistributedCache) WaitReady(ctx context.Context) error {
 }
 
 func (d *DistributedCache) isClosed() bool {
-	return d != nil && d.closed.Load()
+	return d != nil && d.lifecycle.isClosed()
 }
 
 func (d *DistributedCache) beginOperation() bool {
-	if d == nil {
-		return false
-	}
-	d.operationMu.Lock()
-	defer d.operationMu.Unlock()
-	if d.closed.Load() {
-		return false
-	}
-	d.operationWg.Add(1)
-	return true
+	return d != nil && d.lifecycle.beginOperation()
 }
 
 func (d *DistributedCache) Fetch(_ context.Context, key string) (control.Entry, bool, error) {
 	if !d.beginOperation() {
 		return control.Entry{}, false, ErrClosed
 	}
-	defer d.operationWg.Done()
+	defer d.lifecycle.finishOperation()
 	entry, found := d.store.GetEntry(key)
 	if found {
 		d.observeVersion(entry.Version)
@@ -744,7 +721,7 @@ func (d *DistributedCache) Store(ctx context.Context, key string, value []byte, 
 	if !d.beginOperation() {
 		return ErrClosed
 	}
-	defer d.operationWg.Done()
+	defer d.lifecycle.finishOperation()
 	if ttl < 0 {
 		return ErrInvalidTTL
 	}
@@ -797,7 +774,7 @@ func (d *DistributedCache) Delete(ctx context.Context, key string, version versi
 	if !d.beginOperation() {
 		return ErrClosed
 	}
-	defer d.operationWg.Done()
+	defer d.lifecycle.finishOperation()
 	ownerAssigned := version.IsZero()
 	if ownerAssigned {
 		version = d.nextVersionForKey(key)
@@ -1043,10 +1020,10 @@ func (d *DistributedCache) replicateWithAcknowledgements(ctx context.Context, ke
 			continue
 		}
 		wg.Add(1)
-		d.replicationWg.Add(1)
+		d.lifecycle.beginReplication()
 		go func(addr string) {
 			defer wg.Done()
-			defer d.replicationWg.Done()
+			defer d.lifecycle.finishReplication()
 			client, err := d.clientFor(addr)
 			if err != nil {
 				d.handlePeerError(addr, "replicate-quorum", err)
@@ -1136,10 +1113,10 @@ func (d *DistributedCache) replicateDeleteWithAcknowledgements(ctx context.Conte
 			continue
 		}
 		wg.Add(1)
-		d.replicationWg.Add(1)
+		d.lifecycle.beginReplication()
 		go func(addr string) {
 			defer wg.Done()
-			defer d.replicationWg.Done()
+			defer d.lifecycle.finishReplication()
 			client, err := d.clientFor(addr)
 			if err != nil {
 				d.handlePeerError(addr, "replicate-delete-quorum", err)
