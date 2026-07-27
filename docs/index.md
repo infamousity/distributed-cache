@@ -128,6 +128,9 @@ node-to-node fetch, store, delete, ping, and repair operations.
 - shared-key authentication for gossip and control-plane traffic
 - optional TLS and mTLS-ready configuration
 
+A TTL of `0` means no expiration. Negative TTLs are rejected with
+`ErrInvalidTTL` and do not mutate cache state.
+
 ## Write Concern
 
 Configuration-driven startup defaults to `majority`. Configure `one`,

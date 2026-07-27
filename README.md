@@ -54,6 +54,9 @@ func main() {
 }
 ```
 
+A TTL of `0` means no expiration. Negative TTLs are rejected with
+`ErrInvalidTTL` and do not mutate cache state.
+
 To use this repository's config-file/env loader from a service, load the public
 `config` package and hand the decoded config to the cache package:
 

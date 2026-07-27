@@ -1956,6 +1956,35 @@ func TestPerCallWriteConcernRejectsUnknownValue(t *testing.T) {
 	}
 }
 
+func TestSetRejectsNegativeTTLWithoutMutation(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "invalid-ttl",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 1,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.Set(context.Background(), "set", []byte("value"), -time.Nanosecond); !errors.Is(err, ErrInvalidTTL) {
+		t.Fatalf("Set error = %v, want ErrInvalidTTL", err)
+	}
+	if _, found := c.store.GetEntry("set"); found {
+		t.Fatal("negative-TTL Set mutated local state")
+	}
+	if err := c.Store(context.Background(), "store", []byte("value"), -time.Nanosecond, version.Zero(), control.WriteConcernOne); !errors.Is(err, ErrInvalidTTL) {
+		t.Fatalf("Store error = %v, want ErrInvalidTTL", err)
+	}
+	if _, found := c.store.GetEntry("store"); found {
+		t.Fatal("negative-TTL Store mutated local state")
+	}
+}
+
 func TestMajorityDelFailureIsIndeterminateAndLocallyVisible(t *testing.T) {
 	gossip1 := getFreePort(t)
 	gossip2 := getFreePort(t)

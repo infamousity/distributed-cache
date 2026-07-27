@@ -129,6 +129,7 @@ type GossipStatus struct {
 var ErrNotReady = errors.New("cache not ready")
 var ErrWriteIndeterminate = errors.New("cache write indeterminate")
 var ErrClosed = errors.New("cache closed")
+var ErrInvalidTTL = errors.New("cache TTL must be >= 0")
 
 // ErrEntryRejected reports that the configured cache capacity or admission
 // policy did not retain a write.
@@ -352,6 +353,9 @@ func (d *DistributedCache) Set(ctx context.Context, key string, value []byte, tt
 		return ErrClosed
 	}
 	defer d.operationWg.Done()
+	if ttl < 0 {
+		return ErrInvalidTTL
+	}
 	call := d.resolveOptions(opts)
 	nsKey := d.namespacedKey(key, call)
 	wc := d.writeConcern(call)
@@ -741,6 +745,9 @@ func (d *DistributedCache) Store(ctx context.Context, key string, value []byte, 
 		return ErrClosed
 	}
 	defer d.operationWg.Done()
+	if ttl < 0 {
+		return ErrInvalidTTL
+	}
 	ownerAssigned := version.IsZero()
 	if ownerAssigned {
 		version = d.nextVersionForKey(key)
