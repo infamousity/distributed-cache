@@ -501,12 +501,16 @@ func TestVerifyPeerEvictsClientOnIdentityMismatch(t *testing.T) {
 		t.Fatalf("clientFor returned nil client")
 	}
 
+	c.cluster.GetNode().Add("node-expected", controlAddr)
 	c.verifyPeer("node-expected", controlAddr)
 	c.clientMu.Lock()
 	_, ok := c.clients[controlAddr]
 	c.clientMu.Unlock()
 	if ok {
 		t.Fatalf("expected identity mismatch to evict cached client")
+	}
+	if _, ok := c.cluster.GetNode().GetForwardAddr("node-expected"); ok {
+		t.Fatalf("expected identity-mismatched peer to be removed from routing ring")
 	}
 }
 
@@ -720,6 +724,31 @@ func TestStartGeneratesSharedKeyUnlessInsecureAllowed(t *testing.T) {
 		t.Fatalf("explicit insecure mode generated shared key %q, want empty", c.opts.SharedKey)
 	}
 	defer c.Close()
+}
+
+func TestSetReportsOwnerAdmissionRejection(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "node-admission-rejection",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 1,
+		CacheSizeBytes:    1,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	err = c.Set(context.Background(), "oversized", []byte("value"), time.Minute)
+	if !errors.Is(err, ErrEntryRejected) {
+		t.Fatalf("set error = %v, want ErrEntryRejected", err)
+	}
+	if value, found, getErr := c.Get(context.Background(), "oversized"); getErr != nil || found {
+		t.Fatalf("rejected value = %q found=%v err=%v, want miss", value, found, getErr)
+	}
 }
 
 func TestStartRequiresConfiguredSharedKeyWhenPolicyEnabled(t *testing.T) {
@@ -946,6 +975,18 @@ func keyOwnedByOtherNode(t *testing.T, c *DistributedCache) string {
 	return ""
 }
 
+func keyOwnedByNode(t *testing.T, c *DistributedCache, nodeName string) string {
+	t.Helper()
+	for i := 0; i < 10000; i++ {
+		key := fmt.Sprintf("owned-by-%s-%d", nodeName, i)
+		if owner, ok := c.cluster.GetNode().Get(key); ok && owner == nodeName {
+			return key
+		}
+	}
+	t.Fatalf("failed to find key owned by %s", nodeName)
+	return ""
+}
+
 func TestForwardedSetReturnsNotReadyForUnverifiedOwner(t *testing.T) {
 	c, err := Start(Options{
 		NodeName:          "set-forwarder",
@@ -993,6 +1034,185 @@ func TestForwardedDelReturnsNotReadyForUnverifiedOwner(t *testing.T) {
 	err = c.Del(context.Background(), key)
 	if !errors.Is(err, ErrNotReady) {
 		t.Fatalf("Del error = %v, want ErrNotReady", err)
+	}
+}
+
+func TestReplicaFallbackUsesCallerContextAfterOwnerTimeout(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "fallback-caller",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 3,
+		ControlTimeout:    50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("start caller: %v", err)
+	}
+	defer c.Close()
+
+	owner, err := control.NewServer(&testControlHandler{
+		name: "fallback-owner",
+		fetch: func(ctx context.Context, _ string) (control.Entry, bool, error) {
+			<-ctx.Done()
+			return control.Entry{}, false, ctx.Err()
+		},
+	}, control.ServerOptions{BindAddr: "127.0.0.1:0", SharedKey: "test-key"})
+	if err != nil {
+		t.Fatalf("start owner server: %v", err)
+	}
+	owner.Start()
+	defer owner.Stop()
+
+	wantVersion := testVersion(time.Now().UnixMilli(), "fallback-replica")
+	replica, err := control.NewServer(&testControlHandler{
+		name: "fallback-replica",
+		fetch: func(context.Context, string) (control.Entry, bool, error) {
+			return control.Entry{Value: []byte("replica-value"), Version: wantVersion}, true, nil
+		},
+	}, control.ServerOptions{BindAddr: "127.0.0.1:0", SharedKey: "test-key"})
+	if err != nil {
+		t.Fatalf("start replica server: %v", err)
+	}
+	replica.Start()
+	defer replica.Stop()
+
+	c.cluster.GetNode().Add("fallback-owner", owner.Addr())
+	c.cluster.GetNode().Add("fallback-replica", replica.Addr())
+	key := keyOwnedByNode(t, c, "fallback-owner")
+
+	value, found, err := c.Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("get through replica fallback: %v", err)
+	}
+	if !found || string(value) != "replica-value" {
+		t.Fatalf("fallback value = found %v value %q", found, value)
+	}
+}
+
+func TestClientLookupIsNotBlockedByUnrelatedDial(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "client-lock",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 1,
+		ControlTimeout:    500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	if _, err := c.clientFor(c.control.Addr()); err != nil {
+		t.Fatalf("cache healthy client: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen stalled peer: %v", err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, _ := listener.Accept()
+		accepted <- conn
+	}()
+
+	dialDone := make(chan error, 1)
+	go func() {
+		_, err := c.clientFor(listener.Addr().String())
+		dialDone <- err
+	}()
+	stalledConn := <-accepted
+	if stalledConn == nil {
+		t.Fatal("stalled peer did not accept connection")
+	}
+
+	start := time.Now()
+	if _, err := c.clientFor(c.control.Addr()); err != nil {
+		t.Fatalf("reuse healthy client: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 150*time.Millisecond {
+		t.Fatalf("healthy client lookup blocked for %s behind unrelated dial", elapsed)
+	}
+
+	_ = stalledConn.Close()
+	_ = listener.Close()
+	select {
+	case <-dialDone:
+	case <-time.After(time.Second):
+		t.Fatal("stalled dial did not terminate")
+	}
+}
+
+func TestMajorityReplicationRetainsValueAfterSetReturns(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:                    "value-owner",
+		ControlBindAddr:             "127.0.0.1",
+		ControlBindPort:             getFreePort(t),
+		GossipBindAddr:              "127.0.0.1",
+		GossipBindPort:              getFreePort(t),
+		SharedKey:                   "test-key",
+		ReplicationFactor:           3,
+		ControlTimeout:              time.Second,
+		ReplicationRetryInterval:    50 * time.Millisecond,
+		ReplicationRetryMaxAttempts: 3,
+	})
+	if err != nil {
+		t.Fatalf("start owner: %v", err)
+	}
+	defer c.Close()
+
+	fastStore := make(chan []byte, 1)
+	fast, err := control.NewServer(
+		&testControlHandler{name: "value-fast", storeCh: fastStore},
+		control.ServerOptions{BindAddr: "127.0.0.1:0", SharedKey: "test-key"},
+	)
+	if err != nil {
+		t.Fatalf("start fast replica: %v", err)
+	}
+	fast.Start()
+	defer fast.Stop()
+
+	slowAddr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	c.cluster.GetNode().Add("value-fast", fast.Addr())
+	c.cluster.GetNode().Add("value-slow", slowAddr)
+	key := keyOwnedByNode(t, c, c.NodeName())
+	value := []byte("original")
+
+	if err := c.Set(context.Background(), key, value, time.Minute, WithWriteConcern(WriteConcernMajority)); err != nil {
+		t.Fatalf("majority set: %v", err)
+	}
+	select {
+	case <-fastStore:
+	case <-time.After(time.Second):
+		t.Fatal("fast replica did not acknowledge")
+	}
+	copy(value, []byte("mutated!"))
+
+	slowStore := make(chan []byte, 1)
+	slow, err := control.NewServer(
+		&testControlHandler{name: "value-slow", storeCh: slowStore},
+		control.ServerOptions{BindAddr: slowAddr, SharedKey: "test-key"},
+	)
+	if err != nil {
+		t.Fatalf("start slow replica: %v", err)
+	}
+	slow.Start()
+	defer slow.Stop()
+
+	select {
+	case got := <-slowStore:
+		if string(got) != "original" {
+			t.Fatalf("slow replica value = %q, want original", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow replica did not receive pending replication")
 	}
 }
 
@@ -1537,6 +1757,76 @@ func TestWriteConcernAllRequiresEveryRF3Replica(t *testing.T) {
 	}
 }
 
+func TestConfiguredWriteConcernDoesNotDegradeWithUndersizedRing(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "undersized-ring",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 3,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	for _, writeConcern := range []WriteConcern{WriteConcernMajority, WriteConcernAll} {
+		key := fmt.Sprintf("undersized-%d", writeConcern)
+		err := c.Set(context.Background(), key, []byte("local"), time.Minute, WithWriteConcern(writeConcern))
+		if !errors.Is(err, ErrWriteIndeterminate) {
+			t.Fatalf("write concern %d error = %v, want ErrWriteIndeterminate", writeConcern, err)
+		}
+		value, found := c.store.Get(key)
+		if !found || string(value) != "local" {
+			t.Fatalf("write concern %d local value = found %v value %q", writeConcern, found, value)
+		}
+
+		deleteKey := fmt.Sprintf("undersized-delete-%d", writeConcern)
+		if err := c.Set(context.Background(), deleteKey, []byte("delete"), time.Minute, WithWriteConcern(WriteConcernOne)); err != nil {
+			t.Fatalf("seed delete key for write concern %d: %v", writeConcern, err)
+		}
+		err = c.Del(context.Background(), deleteKey, WithWriteConcern(writeConcern))
+		if !errors.Is(err, ErrWriteIndeterminate) {
+			t.Fatalf("delete concern %d error = %v, want ErrWriteIndeterminate", writeConcern, err)
+		}
+		entry, found := c.store.GetEntry(deleteKey)
+		if !found || !entry.Tombstone {
+			t.Fatalf("delete concern %d local entry = found %v entry %+v", writeConcern, found, entry)
+		}
+	}
+}
+
+func TestPerCallWriteConcernRejectsUnknownValue(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "invalid-call-write-concern",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 1,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.Set(context.Background(), "set", []byte("value"), time.Minute, WithWriteConcern(WriteConcern(99))); err == nil {
+		t.Fatal("expected Set to reject unknown write concern")
+	}
+	if _, found := c.store.Get("set"); found {
+		t.Fatal("invalid Set mutated local state")
+	}
+	if err := c.Del(context.Background(), "del", WithWriteConcern(WriteConcern(99))); err == nil {
+		t.Fatal("expected Del to reject unknown write concern")
+	}
+	if _, found := c.store.GetEntry("del"); found {
+		t.Fatal("invalid Del created a tombstone")
+	}
+}
+
 func TestMajorityDelFailureIsIndeterminateAndLocallyVisible(t *testing.T) {
 	gossip1 := getFreePort(t)
 	gossip2 := getFreePort(t)
@@ -1777,6 +2067,65 @@ func TestDistributedCacheOperationsAfterCloseReturnErrClosed(t *testing.T) {
 	}
 	if err := c.Delete(context.Background(), "k", version.Zero(), control.WriteConcernOne); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Delete error = %v, want ErrClosed", err)
+	}
+}
+
+func TestCloseWaitsForAdmittedOperation(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "close-caller",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 1,
+		ControlTimeout:    time.Second,
+	})
+	if err != nil {
+		t.Fatalf("start caller: %v", err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	owner, err := control.NewServer(&testControlHandler{
+		name: "close-owner",
+		fetch: func(context.Context, string) (control.Entry, bool, error) {
+			close(entered)
+			<-release
+			return control.Entry{Value: []byte("value"), Version: testVersion(time.Now().UnixMilli(), "close-owner")}, true, nil
+		},
+	}, control.ServerOptions{BindAddr: "127.0.0.1:0", SharedKey: "test-key"})
+	if err != nil {
+		t.Fatalf("start owner server: %v", err)
+	}
+	owner.Start()
+	defer owner.Stop()
+
+	c.cluster.GetNode().Add("close-owner", owner.Addr())
+	key := keyOwnedByNode(t, c, "close-owner")
+	getDone := make(chan error, 1)
+	go func() {
+		_, _, err := c.Get(context.Background(), key)
+		getDone <- err
+	}()
+	<-entered
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- c.Close()
+	}()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before admitted Get completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-getDone; err != nil {
+		t.Fatalf("admitted Get failed during Close: %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 
@@ -2373,4 +2722,32 @@ func TestMTLSWrongCAFails(t *testing.T) {
 	if _, err := clientConn.Ping(context.Background()); err == nil {
 		t.Fatalf("expected mTLS failure with wrong client cert, got nil")
 	}
+}
+
+type testControlHandler struct {
+	name    string
+	fetch   func(context.Context, string) (control.Entry, bool, error)
+	storeCh chan []byte
+}
+
+func (h *testControlHandler) NodeName() string {
+	return h.name
+}
+
+func (h *testControlHandler) Fetch(ctx context.Context, key string) (control.Entry, bool, error) {
+	if h.fetch == nil {
+		return control.Entry{}, false, nil
+	}
+	return h.fetch(ctx, key)
+}
+
+func (h *testControlHandler) Store(_ context.Context, _ string, value []byte, _ time.Duration, _ version.Version, _ control.WriteConcern) error {
+	if h.storeCh != nil {
+		h.storeCh <- cloneBytes(value)
+	}
+	return nil
+}
+
+func (h *testControlHandler) Delete(context.Context, string, version.Version, control.WriteConcern) error {
+	return nil
 }

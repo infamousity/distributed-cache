@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
+	storecache "github.com/infamousity/distributed-cache/internal/cache"
 	"github.com/infamousity/distributed-cache/internal/controlpb"
 	"github.com/infamousity/distributed-cache/internal/log"
 	"github.com/infamousity/distributed-cache/internal/version"
@@ -121,7 +122,11 @@ func (s *Server) Store(ctx context.Context, req *controlpb.StoreRequest) (*contr
 	if err != nil {
 		return nil, err
 	}
-	if err := s.handler.Store(ctx, req.GetKey(), req.GetValue(), ttl, fromProtoVersion(req.GetVersion()), fromProtoWriteConcern(req.GetWriteConcern())); err != nil {
+	writeConcern, err := fromProtoWriteConcern(req.GetWriteConcern())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := s.handler.Store(ctx, req.GetKey(), req.GetValue(), ttl, fromProtoVersion(req.GetVersion()), writeConcern); err != nil {
 		return nil, rpcError(err)
 	}
 	return &controlpb.StoreResponse{Ok: true}, nil
@@ -136,7 +141,11 @@ func durationFromMilliseconds(milliseconds int64) (time.Duration, error) {
 }
 
 func (s *Server) Delete(ctx context.Context, req *controlpb.DeleteRequest) (*controlpb.DeleteResponse, error) {
-	if err := s.handler.Delete(ctx, req.GetKey(), fromProtoVersion(req.GetVersion()), fromProtoWriteConcern(req.GetWriteConcern())); err != nil {
+	writeConcern, err := fromProtoWriteConcern(req.GetWriteConcern())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := s.handler.Delete(ctx, req.GetKey(), fromProtoVersion(req.GetVersion()), writeConcern); err != nil {
 		return nil, rpcError(err)
 	}
 	return &controlpb.DeleteResponse{Ok: true}, nil
@@ -147,6 +156,9 @@ type versionConflict interface {
 }
 
 func rpcError(err error) error {
+	if errors.Is(err, storecache.ErrEntryRejected) {
+		return status.Error(codes.ResourceExhausted, err.Error())
+	}
 	var conflict versionConflict
 	if !errors.As(err, &conflict) {
 		return err

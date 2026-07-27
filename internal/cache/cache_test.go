@@ -33,6 +33,51 @@ func TestStoreSetIsImmediatelyReadable(t *testing.T) {
 	}
 }
 
+func TestStoreReportsAdmissionRejection(t *testing.T) {
+	store, err := NewStore(1)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	err = store.ApplyVersioned("oversized", []byte("value"), time.Minute, v(1))
+	if !errors.Is(err, ErrEntryRejected) {
+		t.Fatalf("apply error = %v, want ErrEntryRejected", err)
+	}
+	if entry, found := store.GetEntry("oversized"); found {
+		t.Fatalf("rejected entry remained readable: %+v", entry)
+	}
+	store.mu.Lock()
+	_, retained := store.meta["oversized"]
+	store.mu.Unlock()
+	if retained {
+		t.Fatal("rejected entry retained version metadata")
+	}
+}
+
+func TestAdmissionCountersScaleWithCacheCapacity(t *testing.T) {
+	if got := admissionCounters(1 << 20); got <= minAdmissionCounters || got >= maxAdmissionCounters {
+		t.Fatalf("1 MiB admission counters = %d, want capacity-derived value", got)
+	}
+	if got := admissionCounters(1 << 30); got != maxAdmissionCounters {
+		t.Fatalf("1 GiB admission counters = %d, want capped value %d", got, maxAdmissionCounters)
+	}
+	if got := admissionCounters(1); got != minAdmissionCounters {
+		t.Fatalf("minimal admission counters = %d, want %d", got, minAdmissionCounters)
+	}
+}
+
+func TestEntryCostIncludesKeyBytes(t *testing.T) {
+	entry := Entry{Value: []byte("value")}
+	if got, want := entryCost("key", entry), int64(len("key")+len("value")); got != want {
+		t.Fatalf("entry cost = %d, want %d", got, want)
+	}
+	entry = Entry{Tombstone: true}
+	if got, want := entryCost("key", entry), int64(len("key")+1); got != want {
+		t.Fatalf("tombstone cost = %d, want %d", got, want)
+	}
+}
+
 func TestStoreCopiesValuesAtBoundary(t *testing.T) {
 	store, err := NewStore(1 << 20)
 	if err != nil {

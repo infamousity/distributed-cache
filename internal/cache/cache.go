@@ -14,6 +14,10 @@ import (
 const (
 	defaultMaxMetadataEntries = 1_000_000
 	metadataCleanupScanLimit  = 64
+	minAdmissionCounters      = 1_024
+	maxAdmissionCounters      = 10_000_000
+	estimatedMinEntryCost     = 64
+	admissionCountersPerEntry = 10
 )
 
 type Store struct {
@@ -37,7 +41,10 @@ type entryMeta struct {
 	expiresAt time.Time
 }
 
-var ErrStaleVersion = errors.New("stale cache version")
+var (
+	ErrEntryRejected = errors.New("cache rejected entry")
+	ErrStaleVersion  = errors.New("stale cache version")
+)
 
 type StaleVersionError struct {
 	Current version.Version
@@ -60,7 +67,7 @@ func NewStore(maxCost int64) (*Store, error) {
 		return nil, fmt.Errorf("maxCost must be > 0")
 	}
 	c, err := ristretto.NewCache[string, Entry](&ristretto.Config[string, Entry]{
-		NumCounters: 1e7,
+		NumCounters: admissionCounters(maxCost),
 		MaxCost:     maxCost,
 		BufferItems: 64,
 	})
@@ -165,28 +172,50 @@ func (s *Store) put(key string, entry Entry, ttl time.Duration) error {
 			return fmt.Errorf("cache metadata capacity reached")
 		}
 	}
-	cost := int64(len(entry.Value))
-	if entry.Tombstone {
-		cost = 1
-	}
+	cost := entryCost(key, entry)
 	var ok bool
 	if ttl > 0 {
 		ok = s.cache.SetWithTTL(key, entry, cost, ttl)
 	} else {
 		ok = s.cache.Set(key, entry, cost)
 	}
-	if ok {
-		s.cache.Wait()
-		s.meta[key] = nextMeta
-		if entry.Version.Compare(s.lastVersion) > 0 {
-			s.lastVersion = entry.Version
-		}
-		s.cleanupSomeMetadataLocked(now, false)
-	}
 	if !ok {
-		return fmt.Errorf("cache rejected entry")
+		return ErrEntryRejected
 	}
+	s.cache.Wait()
+	admitted, found := s.cache.Get(key)
+	if !found || admitted.Version.Compare(entry.Version) != 0 || admitted.Tombstone != entry.Tombstone {
+		return ErrEntryRejected
+	}
+	s.meta[key] = nextMeta
+	if entry.Version.Compare(s.lastVersion) > 0 {
+		s.lastVersion = entry.Version
+	}
+	s.cleanupSomeMetadataLocked(now, false)
 	return nil
+}
+
+func admissionCounters(maxCost int64) int64 {
+	estimatedEntries := maxCost / estimatedMinEntryCost
+	if estimatedEntries < 1 {
+		estimatedEntries = 1
+	}
+	if estimatedEntries >= maxAdmissionCounters/admissionCountersPerEntry {
+		return maxAdmissionCounters
+	}
+	counters := estimatedEntries * admissionCountersPerEntry
+	if counters < minAdmissionCounters {
+		return minAdmissionCounters
+	}
+	return counters
+}
+
+func entryCost(key string, entry Entry) int64 {
+	valueCost := len(entry.Value)
+	if entry.Tombstone {
+		valueCost = 1
+	}
+	return int64(len(key)) + int64(valueCost)
 }
 
 func (s *Store) Del(key string) {
@@ -215,16 +244,6 @@ func cloneBytes(value []byte) []byte {
 	out := make([]byte, len(value))
 	copy(out, value)
 	return out
-}
-
-func isOlder(next, current Entry) bool {
-	if next.Version.Compare(current.Version) < 0 {
-		return true
-	}
-	if next.Version.Compare(current.Version) > 0 {
-		return false
-	}
-	return current.Tombstone && !next.Tombstone
 }
 
 func metaIsOlder(next, current entryMeta) bool {

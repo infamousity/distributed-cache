@@ -3,12 +3,14 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sync"
 	"testing"
 	"time"
 
 	storecache "github.com/infamousity/distributed-cache/internal/cache"
+	"github.com/infamousity/distributed-cache/internal/controlpb"
 	"github.com/infamousity/distributed-cache/internal/version"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -56,6 +58,13 @@ func TestStaleVersionIsReturnedAsAborted(t *testing.T) {
 	}
 }
 
+func TestEntryRejectionIsReturnedAsResourceExhausted(t *testing.T) {
+	err := rpcError(fmt.Errorf("store value: %w", storecache.ErrEntryRejected))
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("rpc error = %v, want ResourceExhausted", err)
+	}
+}
+
 func TestTTLMillisecondsRoundsPositiveTTLUp(t *testing.T) {
 	if got := ttlMilliseconds(0); got != 0 {
 		t.Fatalf("ttlMilliseconds(0)=%d, want 0", got)
@@ -65,6 +74,37 @@ func TestTTLMillisecondsRoundsPositiveTTLUp(t *testing.T) {
 	}
 	if got := ttlMilliseconds(2 * time.Millisecond); got != 2 {
 		t.Fatalf("ttlMilliseconds(2ms)=%d, want 2", got)
+	}
+}
+
+func TestServerRejectsUnknownWireWriteConcern(t *testing.T) {
+	handler := &captureHandler{}
+	server, err := NewServer(handler, ServerOptions{BindAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	server.Start()
+	defer server.Stop()
+
+	client, err := Dial(server.Addr(), ClientOptions{DialTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+	raw := controlpb.NewControlPlaneClient(client.conn)
+
+	if _, err := raw.Store(context.Background(), &controlpb.StoreRequest{
+		Key:          "k",
+		Value:        []byte("v"),
+		WriteConcern: controlpb.WriteConcern(99),
+	}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Store error = %v, want InvalidArgument", err)
+	}
+	if _, err := raw.Delete(context.Background(), &controlpb.DeleteRequest{
+		Key:          "k",
+		WriteConcern: controlpb.WriteConcern(99),
+	}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Delete error = %v, want InvalidArgument", err)
 	}
 }
 

@@ -70,11 +70,12 @@ type DistributedCache struct {
 	peerWarnMu   sync.Mutex
 	peerWarnLast map[string]time.Time
 
-	peerMu    sync.RWMutex
-	peers     map[string]PeerStatus
-	verifyMu  sync.Mutex
-	verifying map[string]struct{}
-	verifyWg  sync.WaitGroup
+	peerMu     sync.RWMutex
+	peers      map[string]PeerStatus
+	verifyMu   sync.Mutex
+	verifying  map[string]struct{}
+	verifyWg   sync.WaitGroup
+	verifyStop bool
 
 	churnMu       sync.Mutex
 	ownershipLost map[string]time.Time
@@ -82,6 +83,9 @@ type DistributedCache struct {
 	closeOnce sync.Once
 	closeErr  error
 	closed    atomic.Bool
+
+	operationMu sync.Mutex
+	operationWg sync.WaitGroup
 }
 
 var lookupIPAddr = net.DefaultResolver.LookupIPAddr
@@ -127,6 +131,10 @@ type GossipStatus struct {
 var ErrNotReady = errors.New("cache not ready")
 var ErrWriteIndeterminate = errors.New("cache write indeterminate")
 var ErrClosed = errors.New("cache closed")
+
+// ErrEntryRejected reports that the configured cache capacity or admission
+// policy did not retain a write.
+var ErrEntryRejected = cache.ErrEntryRejected
 
 type WriteIndeterminateError struct {
 	Op  string
@@ -177,9 +185,10 @@ func StartFromConfigFiles(paths ...string) (*DistributedCache, error) {
 }
 
 func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) ([]byte, bool, error) {
-	if d.isClosed() {
+	if !d.beginOperation() {
 		return nil, false, ErrClosed
 	}
+	defer d.operationWg.Done()
 	call := d.resolveOptions(opts)
 	nsKey := d.namespacedKey(key, call)
 
@@ -225,9 +234,9 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 		d.handlePeerError(addr, "get-forward", err)
 		return nil, false, err
 	}
-	ctx, cancel := d.withTimeout(ctx)
+	ownerCtx, cancel := d.withTimeout(ctx)
 	defer cancel()
-	entry, found, err := client.Fetch(ctx, nsKey)
+	entry, found, err := client.Fetch(ownerCtx, nsKey)
 	if err == nil {
 		if found {
 			d.observeVersion(entry.Version)
@@ -333,12 +342,16 @@ func (d *DistributedCache) Get(ctx context.Context, key string, opts ...Option) 
 }
 
 func (d *DistributedCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration, opts ...SetOption) error {
-	if d.isClosed() {
+	if !d.beginOperation() {
 		return ErrClosed
 	}
+	defer d.operationWg.Done()
 	call := d.resolveOptions(opts)
 	nsKey := d.namespacedKey(key, call)
 	wc := d.writeConcern(call)
+	if !validWriteConcern(wc) {
+		return fmt.Errorf("invalid write concern %d", wc)
+	}
 
 	owner, ok := d.cluster.GetNode().Get(nsKey)
 	if !ok {
@@ -369,6 +382,9 @@ func (d *DistributedCache) Set(ctx context.Context, key string, value []byte, tt
 			if control.IsWriteIndeterminate(err) {
 				return &WriteIndeterminateError{Op: "set", Key: key, Err: err}
 			}
+			if status.Code(err) == codes.ResourceExhausted {
+				return fmt.Errorf("%w: %v", ErrEntryRejected, err)
+			}
 			return err
 		}
 		return nil
@@ -391,12 +407,16 @@ func (d *DistributedCache) Set(ctx context.Context, key string, value []byte, tt
 }
 
 func (d *DistributedCache) Del(ctx context.Context, key string, opts ...DelOption) error {
-	if d.isClosed() {
+	if !d.beginOperation() {
 		return ErrClosed
 	}
+	defer d.operationWg.Done()
 	call := d.resolveOptions(opts)
 	nsKey := d.namespacedKey(key, call)
 	wc := d.writeConcern(call)
+	if !validWriteConcern(wc) {
+		return fmt.Errorf("invalid write concern %d", wc)
+	}
 
 	owner, ok := d.cluster.GetNode().Get(nsKey)
 	if !ok {
@@ -427,6 +447,9 @@ func (d *DistributedCache) Del(ctx context.Context, key string, opts ...DelOptio
 			if control.IsWriteIndeterminate(err) {
 				return &WriteIndeterminateError{Op: "del", Key: key, Err: err}
 			}
+			if status.Code(err) == codes.ResourceExhausted {
+				return fmt.Errorf("%w: %v", ErrEntryRejected, err)
+			}
 			return err
 		}
 		return nil
@@ -450,7 +473,9 @@ func (d *DistributedCache) Del(ctx context.Context, key string, opts ...DelOptio
 
 func (d *DistributedCache) Close() error {
 	d.closeOnce.Do(func() {
+		d.operationMu.Lock()
 		d.closed.Store(true)
+		d.operationMu.Unlock()
 		d.stopRepairWorker()
 		d.stopPeerWorker()
 		d.stopDiagnosticsWorker()
@@ -459,6 +484,7 @@ func (d *DistributedCache) Close() error {
 		if d.control != nil {
 			d.control.Stop()
 		}
+		d.operationWg.Wait()
 		if d.cluster != nil {
 			if err := d.cluster.Shutdown(); err != nil && d.closeErr == nil {
 				d.closeErr = err
@@ -675,10 +701,24 @@ func (d *DistributedCache) isClosed() bool {
 	return d != nil && d.closed.Load()
 }
 
+func (d *DistributedCache) beginOperation() bool {
+	if d == nil {
+		return false
+	}
+	d.operationMu.Lock()
+	defer d.operationMu.Unlock()
+	if d.closed.Load() {
+		return false
+	}
+	d.operationWg.Add(1)
+	return true
+}
+
 func (d *DistributedCache) Fetch(_ context.Context, key string) (control.Entry, bool, error) {
-	if d.isClosed() {
+	if !d.beginOperation() {
 		return control.Entry{}, false, ErrClosed
 	}
+	defer d.operationWg.Done()
 	entry, found := d.store.GetEntry(key)
 	if found {
 		d.observeVersion(entry.Version)
@@ -691,9 +731,10 @@ func (d *DistributedCache) Fetch(_ context.Context, key string) (control.Entry, 
 }
 
 func (d *DistributedCache) Store(ctx context.Context, key string, value []byte, ttl time.Duration, version version.Version, wc control.WriteConcern) error {
-	if d.isClosed() {
+	if !d.beginOperation() {
 		return ErrClosed
 	}
+	defer d.operationWg.Done()
 	ownerAssigned := version.IsZero()
 	if ownerAssigned {
 		version = d.nextVersionForKey(key)
@@ -740,9 +781,10 @@ func (d *DistributedCache) Store(ctx context.Context, key string, value []byte, 
 }
 
 func (d *DistributedCache) Delete(ctx context.Context, key string, version version.Version, wc control.WriteConcern) error {
-	if d.isClosed() {
+	if !d.beginOperation() {
 		return ErrClosed
 	}
+	defer d.operationWg.Done()
 	ownerAssigned := version.IsZero()
 	if ownerAssigned {
 		version = d.nextVersionForKey(key)
@@ -786,10 +828,6 @@ func (d *DistributedCache) Delete(ctx context.Context, key string, version versi
 	default:
 		return d.replicateDelete(ctx, key, version)
 	}
-}
-
-func (d *DistributedCache) storeLocal(key string, value []byte, ttl time.Duration) error {
-	return d.storeLocalVersioned(key, value, ttl, d.nextVersionForKey(key))
 }
 
 func (d *DistributedCache) storeLocalVersioned(key string, value []byte, ttl time.Duration, version version.Version) error {
@@ -967,24 +1005,28 @@ func (d *DistributedCache) replicateDelete(ctx context.Context, key string, vers
 
 func (d *DistributedCache) replicateWithAcknowledgements(ctx context.Context, key string, value []byte, ttl time.Duration, version version.Version, requireAll bool) error {
 	members, ok := d.cluster.GetNode().GetN(key, d.opts.ReplicationFactor)
-	if !ok || len(members) == 0 {
-		return nil
+	if !ok {
+		return fmt.Errorf("replica set unavailable")
 	}
-	quorum := len(members)/2 + 1
-	if requireAll {
-		quorum = len(members)
-	}
-	acks := 1 // self
-	if quorum <= 1 {
-		return nil
-	}
+	quorum := requiredAcknowledgements(d.opts.ReplicationFactor, requireAll)
 	self := d.cluster.GetNode().GetSelf()
+	acks := 0
+	for _, member := range members {
+		if member == self {
+			acks = 1
+			break
+		}
+	}
+	if acks >= quorum {
+		return nil
+	}
+	value = cloneBytes(value)
 	expiresAt := expiresAtForTTL(ttl)
 	resultCh := make(chan error, len(members))
 	var wg sync.WaitGroup
 	var ackCount atomic.Int32
 	var quorumReached atomic.Bool
-	ackCount.Store(1)
+	ackCount.Store(int32(acks))
 	for _, member := range members {
 		if member == self {
 			continue
@@ -1056,23 +1098,26 @@ func (d *DistributedCache) replicateWithAcknowledgements(ctx context.Context, ke
 
 func (d *DistributedCache) replicateDeleteWithAcknowledgements(ctx context.Context, key string, version version.Version, requireAll bool) error {
 	members, ok := d.cluster.GetNode().GetN(key, d.opts.ReplicationFactor)
-	if !ok || len(members) == 0 {
-		return nil
+	if !ok {
+		return fmt.Errorf("replica set unavailable")
 	}
-	quorum := len(members)/2 + 1
-	if requireAll {
-		quorum = len(members)
-	}
-	acks := 1
-	if quorum <= 1 {
-		return nil
-	}
+	quorum := requiredAcknowledgements(d.opts.ReplicationFactor, requireAll)
 	self := d.cluster.GetNode().GetSelf()
+	acks := 0
+	for _, member := range members {
+		if member == self {
+			acks = 1
+			break
+		}
+	}
+	if acks >= quorum {
+		return nil
+	}
 	resultCh := make(chan error, len(members))
 	var wg sync.WaitGroup
 	var ackCount atomic.Int32
 	var quorumReached atomic.Bool
-	ackCount.Store(1)
+	ackCount.Store(int32(acks))
 	for _, member := range members {
 		if member == self {
 			continue
@@ -1157,10 +1202,12 @@ func suppressPostQuorumCanceled(err error, quorumReached *atomic.Bool) bool {
 
 func (d *DistributedCache) clientFor(addr string) (*control.Client, error) {
 	d.clientMu.Lock()
-	defer d.clientMu.Unlock()
 	if c, ok := d.clients[addr]; ok {
+		d.clientMu.Unlock()
 		return c, nil
 	}
+	d.clientMu.Unlock()
+
 	client, err := control.Dial(addr, control.ClientOptions{
 		SharedKey:   d.opts.SharedKey,
 		TLS:         d.clientTLS,
@@ -1169,7 +1216,15 @@ func (d *DistributedCache) clientFor(addr string) (*control.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	d.clientMu.Lock()
+	if existing, ok := d.clients[addr]; ok {
+		d.clientMu.Unlock()
+		_ = client.Close()
+		return existing, nil
+	}
 	d.clients[addr] = client
+	d.clientMu.Unlock()
 	return client, nil
 }
 
@@ -1230,7 +1285,7 @@ func (d *DistributedCache) startPeerVerification(name, addr string) {
 	}
 	verification := name + "\x00" + addr
 	d.verifyMu.Lock()
-	if d.isClosed() {
+	if d.verifyStop || d.isClosed() {
 		d.verifyMu.Unlock()
 		return
 	}
@@ -1255,6 +1310,7 @@ func (d *DistributedCache) startPeerVerification(name, addr string) {
 
 func (d *DistributedCache) waitForPeerVerifications() {
 	d.verifyMu.Lock()
+	d.verifyStop = true
 	d.verifyMu.Unlock()
 	d.verifyWg.Wait()
 }
@@ -1279,6 +1335,7 @@ func (d *DistributedCache) verifyPeer(name, addr string) {
 	if got != name {
 		d.evictClient(addr)
 		d.setPeerState(name, addr, PeerStateIdentityMismatch, fmt.Sprintf("ping returned %s", got))
+		d.cluster.GetNode().Remove(name)
 		d.logger.Warnf("peer identity mismatch for %s: ping returned %s from %s", name, got, addr)
 		return
 	}
@@ -1331,6 +1388,7 @@ func (d *DistributedCache) validatedOwnerAddr(ctx context.Context, owner string)
 	if got != owner {
 		d.evictClient(addr)
 		d.setPeerState(owner, addr, PeerStateIdentityMismatch, fmt.Sprintf("ping returned %s", got))
+		d.cluster.GetNode().Remove(owner)
 		return "", fmt.Errorf("%w: owner %s identity mismatch: ping returned %s", ErrNotReady, owner, got)
 	}
 	d.setPeerState(owner, addr, PeerStateVerified, "")
@@ -1414,6 +1472,20 @@ func (d *DistributedCache) writeConcern(opts CallOptions) WriteConcern {
 		return opts.writeConcern
 	}
 	return d.opts.WriteConcern
+}
+
+func validWriteConcern(wc WriteConcern) bool {
+	return wc == WriteConcernOne || wc == WriteConcernMajority || wc == WriteConcernAll
+}
+
+func requiredAcknowledgements(replicationFactor int, requireAll bool) int {
+	if replicationFactor < 1 {
+		replicationFactor = 1
+	}
+	if requireAll {
+		return replicationFactor
+	}
+	return replicationFactor/2 + 1
 }
 
 func (d *DistributedCache) recordMiss() {

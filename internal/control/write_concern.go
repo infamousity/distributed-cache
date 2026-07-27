@@ -1,6 +1,10 @@
 package control
 
-import "github.com/infamousity/distributed-cache/internal/controlpb"
+import (
+	"fmt"
+
+	"github.com/infamousity/distributed-cache/internal/controlpb"
+)
 
 type WriteConcern int32
 
@@ -24,15 +28,17 @@ func toProtoWriteConcern(wc WriteConcern) controlpb.WriteConcern {
 	}
 }
 
-func fromProtoWriteConcern(wc controlpb.WriteConcern) WriteConcern {
+func fromProtoWriteConcern(wc controlpb.WriteConcern) (WriteConcern, error) {
 	switch wc {
+	case controlpb.WriteConcern_WRITE_CONCERN_ONE:
+		return WriteConcernOne, nil
 	case controlpb.WriteConcern_WRITE_CONCERN_MAJORITY:
-		return WriteConcernMajority
+		return WriteConcernMajority, nil
 	case controlpb.WriteConcern_WRITE_CONCERN_REPLICA:
-		return WriteConcernReplica
+		return WriteConcernReplica, nil
 	case controlpb.WriteConcern_WRITE_CONCERN_ALL:
-		return WriteConcernAll
+		return WriteConcernAll, nil
 	default:
-		return WriteConcernOne
+		return 0, fmt.Errorf("unsupported write concern %d", wc)
 	}
 }

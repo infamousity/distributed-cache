@@ -40,3 +40,12 @@ func TestValidateConfigRejectsUnknownWriteConcern(t *testing.T) {
 		t.Fatal("expected unknown write concern to fail validation")
 	}
 }
+
+func TestRequiredAcknowledgementsUsesConfiguredReplicationFactor(t *testing.T) {
+	if got := requiredAcknowledgements(3, false); got != 2 {
+		t.Fatalf("RF3 majority acknowledgements = %d, want 2", got)
+	}
+	if got := requiredAcknowledgements(3, true); got != 3 {
+		t.Fatalf("RF3 all acknowledgements = %d, want 3", got)
+	}
+}
