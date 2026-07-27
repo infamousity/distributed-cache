@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.env.*
+config.secrets*.yml
+*.secrets.yml
+cache-node
+
+*.crt
+*.key
+*.pem
