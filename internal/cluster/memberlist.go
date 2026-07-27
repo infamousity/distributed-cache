@@ -223,7 +223,6 @@ func (w *gossipLogWriter) Write(p []byte) (int, error) {
 }
 
 type metaDelegate struct {
-	mu   sync.Mutex
 	meta []byte
 	l    log.Interface
 	ring Node

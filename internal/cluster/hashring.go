@@ -194,10 +194,3 @@ func (r *ring) GetSelf() string {
 func (r *ring) GetConfig() *config.Config {
 	return r.cfg
 }
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
