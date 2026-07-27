@@ -16,6 +16,11 @@ Each cache node needs:
 - private node-to-node network reachability for memberlist and gRPC traffic
 - the same `SharedKey` on every node
 
+Configuration files are applied in the order supplied and every named path is
+required. A missing path is a startup error. Process environment variables have
+the final precedence; the library does not automatically read or mutate
+`.env`/`.env.local` files.
+
 Bind addresses answer "where should this process listen?" Advertise addresses
 answer "what address should peers use to reach this process?" In simple VM or
 host-networked deployments those can be the same address. In Swarm,
@@ -32,7 +37,8 @@ When using config files, the repository config loader can derive local IPs with
 template helpers:
 
 - `{{ ip }}` selects a local private interface using
-  `bind_address_filter` and `bind_interface_priority`
+  `bind_address_filter` and `bind_interface_priority`; the default filter is
+  the RFC1918 ranges `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`
 - `{{ peerDNSName }}` returns explicit peer DNS env or, in Swarm, derives
   `tasks.<service>` from `CACHE_RUNTIME=swarm` and
   `CACHE_SWARM_SERVICE_NAME`
@@ -70,12 +76,21 @@ Important defaults:
 - `diagnostics.self_check_timeout_ms`: `1000`
 - `diagnostics.peer_warn_interval_ms`: `10000`
 
+`tombstone_ttl_ms` is the stale-delete protection window, not permanent delete
+history. A replica disconnected longer than that window can rejoin with an
+older value after the other nodes have forgotten the delete version. Configure
+the window longer than the maximum tolerated peer outage and value lifetime
+when stale resurrection is unacceptable.
+
 The write-concern default applies to configuration-driven startup.
 `Start(Options{})` retains the historical `one` default for Go API compatibility;
 set `Options.WriteConcern` explicitly when constructing a cache programmatically.
-With `all`, every replica assigned to the key must acknowledge the version or the
-operation returns `ErrWriteIndeterminate`. It does not automatically degrade to
-majority or `one`; deploy support for `all` to every node before enabling it.
+Majority derives its acknowledgement count from the configured replication
+factor, so RF3 always requires two acknowledgements. With `all`, the configured
+replication factor must acknowledge the version. An undersized ring, unavailable
+replica, or rejected version returns `ErrWriteIndeterminate`; neither policy
+automatically degrades. Deploy support for `all` to every node before enabling
+it.
 
 Traffic requirements:
 

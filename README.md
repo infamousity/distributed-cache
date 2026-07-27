@@ -81,7 +81,7 @@ defer c.Close()
 _ = c.Set(ctx, "k", []byte("v"), time.Second, dcache.WithWriteConcern(dcache.WriteConcernMajority))
 _ = c.Del(ctx, "k", dcache.WithWriteConcern(dcache.WriteConcernMajority))
 
-// Require every assigned replica to acknowledge the version.
+// Require the configured replication factor to acknowledge the version.
 _ = c.Set(ctx, "critical", []byte("v"), time.Second, dcache.WithWriteConcern(dcache.WriteConcernAll))
 ```
 
@@ -93,8 +93,10 @@ Programmatic callers that want the recommended general-purpose default must set
 `Options.WriteConcern: WriteConcernMajority`. The exported numeric values of
 `WriteConcernOne` and `WriteConcernMajority` remain `0` and `1` respectively.
 
-With `WriteConcernMajority`, owner-side quorum failure returns an error matching
-`ErrWriteIndeterminate`:
+With `WriteConcernMajority`, the required acknowledgement count is derived from
+the configured replication factor, not the number of members currently visible
+in the ring. RF3 therefore always requires two acknowledgements. Owner-side
+quorum failure returns an error matching `ErrWriteIndeterminate`:
 
 ```go
 err := c.Del(ctx, "k", dcache.WithWriteConcern(dcache.WriteConcernMajority))
@@ -108,10 +110,17 @@ This cache is availability-oriented: a majority write error does not mean the
 write definitely did not happen. Callers that use majority writes for invalidation
 or delete semantics must treat `ErrWriteIndeterminate` as a distinct outcome.
 
-`WriteConcernAll` waits for every replica assigned to the key. If any assigned
-replica is unavailable or rejects the version, it returns `ErrWriteIndeterminate`.
-This favors consistency over latency and write availability. Deploy support for
-the `all` wire value to every node before enabling it during a rolling upgrade.
+`WriteConcernAll` requires the configured replication factor. If the ring is
+undersized, or any assigned replica is unavailable or rejects the version, it
+returns `ErrWriteIndeterminate`. Neither majority nor all silently weakens when
+members leave the ring. This favors consistency over latency and write
+availability. Deploy support for the `all` wire value to every node before
+enabling it during a rolling upgrade.
+
+If the configured cache capacity or admission policy cannot retain a value,
+`Set` returns an error matching `ErrEntryRejected`. This is a definite local
+admission failure, unlike `ErrWriteIndeterminate`; callers may fall back to the
+source of truth without assuming the cache contains the value.
 
 ### Namespace (Transparent Prefixing)
 
@@ -153,6 +162,12 @@ If `--config` is omitted, the standalone CLI uses `CACHE_CONFIG` when it is set;
 otherwise it falls back to `config.yml`. `--level` is a process-level log
 override. When it is omitted, the CLI uses `common.cache.log.level` /
 `CACHE_LOG_LEVEL`, then defaults to `info`.
+
+Every named config file is required; a missing path fails startup instead of
+silently falling back to defaults. The config package reads the process
+environment but does not automatically load or mutate `.env` files. Local
+development can load an env file in the shell or container runtime before
+starting the process.
 
 For Swarm-style overlay deployments, use `config.swarm.example.yml` as the
 starting profile. It binds cache internals to `0.0.0.0`, derives `peer_dns_name`
@@ -370,6 +385,9 @@ TLS is optional and configured in `common.cache.cluster.tls`. To enable mutual T
   every network attached to the task. Explicit memberlist `advertise_addr`
   values and IP-shaped `api.advertise_addr` values must also be inside these
   CIDRs.
+- The automatic bind-address filter defaults to the RFC1918 networks
+  `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`. Set
+  `bind_address_filter` explicitly when the cache network uses another range.
 - `peerDNSName`, `peerIP`, and `peerAddr` are config-template functions
   evaluated by the repository config loader before YAML is decoded. They are not
   env vars, YAML fields, or `cache.Options` members. `peerIP` and `peerAddr` can
@@ -388,6 +406,12 @@ TLS is optional and configured in `common.cache.cluster.tls`. To enable mutual T
 - Versions use an internal HLC-style tuple `{physical, logical, nodeID}` with explicit compare rules. A node advances its local generator from versions it observes through local storage, fetches, forwarded writes, and replica writes. This prevents local owner writes from going backward after ownership movement, restart-like counter loss, or observing an older wall-clock-derived version from a previous release.
 - A node cannot order itself after a version it has never observed. During a hard partition, the first post-partition reconciliation still depends on replication/read-repair/tombstone exchange.
 - `common.cache.tombstone_ttl_ms` controls how long delete tombstones are retained to reject stale replica/retry writes. The default is `300000` (5 minutes); this is the stale-delete protection window for the memberlist/consistent-hash cache.
+- A replica that remains disconnected longer than the tombstone protection
+  window can rejoin with an older value after healthy nodes have forgotten the
+  delete version. Set the tombstone TTL longer than the maximum tolerated peer
+  outage and value lifetime when stale resurrection is unacceptable. Values
+  without an expiry require an operationally bounded outage or a durable source
+  of truth; this cache does not provide permanent delete history.
 - `cache_gossip_log_messages` and `cache_gossip_degraded_events` expose
   memberlist diagnostic counts when Prometheus metrics are enabled.
 

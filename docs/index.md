@@ -138,11 +138,17 @@ For Go API compatibility, direct `Start(Options{})` calls continue to default to
 `one`. Programmatic callers that want the recommended general-purpose default
 must set `Options.WriteConcern: WriteConcernMajority`, as shown above.
 
-`WriteConcernAll` waits for every replica assigned to the key. If any assigned
-replica is unavailable or rejects the version, the operation returns an error
-matching `ErrWriteIndeterminate`; it does not silently degrade to majority or
-one. Deploy support for `all` to every node before enabling it during a rolling
+`WriteConcernMajority` derives its acknowledgement count from the configured
+replication factor, so RF3 always requires two acknowledgements.
+`WriteConcernAll` requires the configured replication factor. An undersized
+ring, unavailable replica, or rejected version returns an error matching
+`ErrWriteIndeterminate`; neither policy silently degrades when members leave the
+ring. Deploy support for `all` to every node before enabling it during a rolling
 upgrade.
+
+`Set` returns an error matching `ErrEntryRejected` when the configured cache
+capacity or admission policy does not retain the value. This is a definite
+local admission failure rather than an indeterminate quorum outcome.
 
 ## Runtime Contract
 
