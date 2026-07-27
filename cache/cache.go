@@ -44,6 +44,7 @@ type DistributedCache struct {
 	retryDelayCh      chan scheduledRetryTask
 	retryStop         chan struct{}
 	retryWg           sync.WaitGroup
+	replicationWg     sync.WaitGroup
 	retryDelayedDepth atomic.Int64
 
 	peerStop chan struct{}
@@ -485,11 +486,12 @@ func (d *DistributedCache) Close() error {
 		d.stopPeerWorker()
 		d.stopDiagnosticsWorker()
 		d.waitForPeerVerifications()
+		d.operationWg.Wait()
+		d.replicationWg.Wait()
 		d.stopRetryWorker()
 		if d.control != nil {
 			d.control.Stop()
 		}
-		d.operationWg.Wait()
 		if d.cluster != nil {
 			if err := d.cluster.Shutdown(); err != nil && d.closeErr == nil {
 				d.closeErr = err
@@ -1034,8 +1036,10 @@ func (d *DistributedCache) replicateWithAcknowledgements(ctx context.Context, ke
 			continue
 		}
 		wg.Add(1)
+		d.replicationWg.Add(1)
 		go func(addr string) {
 			defer wg.Done()
+			defer d.replicationWg.Done()
 			client, err := d.clientFor(addr)
 			if err != nil {
 				d.handlePeerError(addr, "replicate-quorum", err)
@@ -1125,8 +1129,10 @@ func (d *DistributedCache) replicateDeleteWithAcknowledgements(ctx context.Conte
 			continue
 		}
 		wg.Add(1)
+		d.replicationWg.Add(1)
 		go func(addr string) {
 			defer wg.Done()
+			defer d.replicationWg.Done()
 			client, err := d.clientFor(addr)
 			if err != nil {
 				d.handlePeerError(addr, "replicate-delete-quorum", err)

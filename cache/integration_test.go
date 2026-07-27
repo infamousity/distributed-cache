@@ -1265,6 +1265,86 @@ func TestMajorityReplicationRetainsValueAfterSetReturns(t *testing.T) {
 	}
 }
 
+func TestCloseWaitsForPostQuorumReplication(t *testing.T) {
+	c, err := Start(Options{
+		NodeName:          "close-owner",
+		ControlBindAddr:   "127.0.0.1",
+		ControlBindPort:   getFreePort(t),
+		GossipBindAddr:    "127.0.0.1",
+		GossipBindPort:    getFreePort(t),
+		SharedKey:         "test-key",
+		ReplicationFactor: 3,
+		ControlTimeout:    time.Second,
+	})
+	if err != nil {
+		t.Fatalf("start owner: %v", err)
+	}
+
+	fast, err := control.NewServer(
+		&testControlHandler{name: "close-fast", storeCh: make(chan []byte, 1)},
+		control.ServerOptions{BindAddr: "127.0.0.1:0", SharedKey: "test-key"},
+	)
+	if err != nil {
+		t.Fatalf("start fast replica: %v", err)
+	}
+	fast.Start()
+	defer fast.Stop()
+
+	slowStarted := make(chan struct{}, 1)
+	releaseSlow := make(chan struct{})
+	slow, err := control.NewServer(
+		&testControlHandler{
+			name: "close-slow",
+			store: func(context.Context, string, []byte, time.Duration, version.Version, control.WriteConcern) error {
+				select {
+				case slowStarted <- struct{}{}:
+				default:
+				}
+				<-releaseSlow
+				return nil
+			},
+		},
+		control.ServerOptions{BindAddr: "127.0.0.1:0", SharedKey: "test-key"},
+	)
+	if err != nil {
+		t.Fatalf("start slow replica: %v", err)
+	}
+	slow.Start()
+	defer slow.Stop()
+
+	c.cluster.GetNode().Add("close-fast", fast.Addr())
+	c.cluster.GetNode().Add("close-slow", slow.Addr())
+	key := keyOwnedByNode(t, c, c.NodeName())
+	if err := c.Set(context.Background(), key, []byte("value"), time.Minute, WithWriteConcern(WriteConcernMajority)); err != nil {
+		t.Fatalf("majority set: %v", err)
+	}
+	select {
+	case <-slowStarted:
+	case <-time.After(time.Second):
+		t.Fatal("slow post-quorum replication did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- c.Close()
+	}()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before post-quorum replication finished: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseSlow)
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after post-quorum replication finished")
+	}
+}
+
 func poisonVersionCounter(c *DistributedCache) version.Version {
 	future := testVersion(time.Now().Add(24*time.Hour).UnixMilli(), "future")
 	c.versionMu.Lock()
@@ -2776,6 +2856,7 @@ func TestMTLSWrongCAFails(t *testing.T) {
 type testControlHandler struct {
 	name    string
 	fetch   func(context.Context, string) (control.Entry, bool, error)
+	store   func(context.Context, string, []byte, time.Duration, version.Version, control.WriteConcern) error
 	storeCh chan []byte
 }
 
@@ -2790,7 +2871,10 @@ func (h *testControlHandler) Fetch(ctx context.Context, key string) (control.Ent
 	return h.fetch(ctx, key)
 }
 
-func (h *testControlHandler) Store(_ context.Context, _ string, value []byte, _ time.Duration, _ version.Version, _ control.WriteConcern) error {
+func (h *testControlHandler) Store(ctx context.Context, key string, value []byte, ttl time.Duration, ver version.Version, wc control.WriteConcern) error {
+	if h.store != nil {
+		return h.store(ctx, key, value, ttl, ver, wc)
+	}
 	if h.storeCh != nil {
 		h.storeCh <- cloneBytes(value)
 	}
